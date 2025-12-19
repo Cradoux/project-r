@@ -8,45 +8,13 @@ from typing import List, Tuple
 
 import bpy
 import bmesh
+import numpy as np
 
 from .. import geo
 from .. import imaging
 from .. import manifest as manifest_lib
 from ..projection_backend import ProjectionParams, project_equirect_to_hammer
-
-
-def _largest_connected_selected_faces(bm: bmesh.types.BMesh) -> List[bmesh.types.BMFace]:
-    """
-    Return the largest connected component of selected faces.
-    This avoids tiny stray selections exploding the crop bounds.
-    """
-    selected = [f for f in bm.faces if f.select]
-    if not selected:
-        return []
-
-    visited: set[int] = set()
-    best: List[bmesh.types.BMFace] = []
-
-    for f in selected:
-        if f.index in visited:
-            continue
-        stack = [f]
-        comp: List[bmesh.types.BMFace] = []
-        visited.add(f.index)
-        while stack:
-            cur = stack.pop()
-            comp.append(cur)
-            for e in cur.edges:
-                for nb in e.link_faces:
-                    if not nb.select:
-                        continue
-                    if nb.index in visited:
-                        continue
-                    visited.add(nb.index)
-                    stack.append(nb)
-        if len(comp) > len(best):
-            best = comp
-    return best
+from ..vendor.projectionpasta import projectionpasta as pp
 
 
 def _selected_uv_lonlats(context: bpy.types.Context) -> List[geo.LonLat]:
@@ -66,8 +34,9 @@ def _selected_uv_lonlats(context: bpy.types.Context) -> List[geo.LonLat]:
         return []
 
     pts: List[geo.LonLat] = []
-    faces = _largest_connected_selected_faces(bm)
-    for f in faces:
+    for f in bm.faces:
+        if not f.select:
+            continue
         for loop in f.loops:
             u, v = loop[uv].uv
             pts.append(geo.uv_to_lonlat(float(u), float(v)))
@@ -81,8 +50,7 @@ def _selected_face_indices(context: bpy.types.Context) -> List[int]:
     if context.mode != "EDIT_MESH":
         return []
     bm = bmesh.from_edit_mesh(obj.data)
-    faces = _largest_connected_selected_faces(bm)
-    return [int(f.index) for f in faces]
+    return [int(f.index) for f in bm.faces if f.select]
 
 
 def _compute_crop_rect(
@@ -95,14 +63,20 @@ def _compute_crop_rect(
     square: bool,
 ) -> geo.RectI:
     w, h = full_size
-    xs: List[float] = []
-    ys: List[float] = []
-    for p in lonlats:
-        pr = geo.rotate_to_aspect(p, center=center, rot_rad=rot_rad)
-        x, y = geo.hammer_xy_unit(pr)
-        px, py = geo.unit_xy_to_pixel(x, y, w, h)
-        xs.append(px)
-        ys.append(py)
+    # IMPORTANT: Use projectionpasta's own forward projection for Hammer so
+    # crop bounds match exactly what we render in hammer_full.
+    lons = np.array([p.lon for p in lonlats], dtype=np.float64)
+    lats = np.array([p.lat for p in lonlats], dtype=np.float64)
+
+    aspect = np.array([center.lon, center.lat, rot_rad], dtype=np.float64)
+    lon_r, lat_r = pp.Rotate_to(lons, lats, aspect)
+
+    opts = dict(pp.def_opts)
+    opts["in"] = False
+    x, y = pp.posl["Hammer"](lon_r, lat_r, opts)  # x,y are in [-1,1]
+
+    xs = ((x + 1.0) / 2.0 * w - 0.5).tolist()
+    ys = ((1.0 - y) / 2.0 * h - 0.5).tolist()
 
     if not xs:
         return geo.RectI(0, 0, w, h)
