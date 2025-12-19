@@ -15,6 +15,40 @@ from .. import manifest as manifest_lib
 from ..projection_backend import ProjectionParams, project_equirect_to_hammer
 
 
+def _largest_connected_selected_faces(bm: bmesh.types.BMesh) -> List[bmesh.types.BMFace]:
+    """
+    Return the largest connected component of selected faces.
+    This avoids tiny stray selections exploding the crop bounds.
+    """
+    selected = [f for f in bm.faces if f.select]
+    if not selected:
+        return []
+
+    visited: set[int] = set()
+    best: List[bmesh.types.BMFace] = []
+
+    for f in selected:
+        if f.index in visited:
+            continue
+        stack = [f]
+        comp: List[bmesh.types.BMFace] = []
+        visited.add(f.index)
+        while stack:
+            cur = stack.pop()
+            comp.append(cur)
+            for e in cur.edges:
+                for nb in e.link_faces:
+                    if not nb.select:
+                        continue
+                    if nb.index in visited:
+                        continue
+                    visited.add(nb.index)
+                    stack.append(nb)
+        if len(comp) > len(best):
+            best = comp
+    return best
+
+
 def _selected_uv_lonlats(context: bpy.types.Context) -> List[geo.LonLat]:
     obj = context.active_object
     if obj is None or obj.type != "MESH":
@@ -32,9 +66,8 @@ def _selected_uv_lonlats(context: bpy.types.Context) -> List[geo.LonLat]:
         return []
 
     pts: List[geo.LonLat] = []
-    for f in bm.faces:
-        if not f.select:
-            continue
+    faces = _largest_connected_selected_faces(bm)
+    for f in faces:
         for loop in f.loops:
             u, v = loop[uv].uv
             pts.append(geo.uv_to_lonlat(float(u), float(v)))
@@ -48,7 +81,8 @@ def _selected_face_indices(context: bpy.types.Context) -> List[int]:
     if context.mode != "EDIT_MESH":
         return []
     bm = bmesh.from_edit_mesh(obj.data)
-    return [int(f.index) for f in bm.faces if f.select]
+    faces = _largest_connected_selected_faces(bm)
+    return [int(f.index) for f in faces]
 
 
 def _compute_crop_rect(
