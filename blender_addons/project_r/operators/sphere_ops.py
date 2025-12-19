@@ -1,0 +1,248 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import bpy
+import bmesh
+from bpy.types import Operator
+
+
+def _get_edit_bmesh(context: bpy.types.Context) -> bmesh.types.BMesh | None:
+    obj = context.active_object
+    if obj is None or obj.type != "MESH":
+        return None
+    if context.mode != "EDIT_MESH":
+        return None
+    return bmesh.from_edit_mesh(obj.data)
+
+
+class PP_OT_create_sphere(Operator):
+    bl_idname = "pp.create_sphere"
+    bl_label = "Create Projection Sphere"
+    bl_description = "Create a UV sphere suitable for equirectangular preview and face selection"
+
+    def execute(self, context: bpy.types.Context):
+        s = context.scene.projection_pasta
+
+        # `mode_set` requires an active object; if the scene is empty (or nothing is
+        # active), this operator will fail. Only switch modes when it's valid.
+        if context.mode != "OBJECT":
+            if context.active_object is not None and bpy.ops.object.mode_set.poll():
+                bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.mesh.primitive_uv_sphere_add(
+            segments=64,
+            ring_count=32,
+            radius=1.0,
+        )
+        obj = context.active_object
+        if obj is None:
+            self.report({"ERROR"}, "Failed to create sphere")
+            return {"CANCELLED"}
+        obj.name = s.sphere_object_name
+
+        # Ensure a UV map exists
+        if obj.data.uv_layers.active is None:
+            obj.data.uv_layers.new(name="UVMap")
+
+        self.report({"INFO"}, f"Created sphere: {obj.name}")
+        return {"FINISHED"}
+
+
+class PP_OT_assign_preview_texture(Operator):
+    bl_idname = "pp.assign_preview_texture"
+    bl_label = "Assign Preview Texture"
+    bl_description = "Assign an Image Texture from source/ to the sphere for visual selection"
+
+    filepath: bpy.props.StringProperty(  # type: ignore[valid-type]
+        name="Image",
+        subtype="FILE_PATH",
+        default="",
+    )
+
+    def invoke(self, context: bpy.types.Context, event: bpy.types.Event):
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context: bpy.types.Context):
+        s = context.scene.projection_pasta
+        obj = bpy.data.objects.get(s.sphere_object_name)
+        if obj is None or obj.type != "MESH":
+            self.report({"ERROR"}, f"Sphere object not found: {s.sphere_object_name}")
+            return {"CANCELLED"}
+        if not self.filepath:
+            self.report({"ERROR"}, "No image selected")
+            return {"CANCELLED"}
+
+        img = bpy.data.images.load(self.filepath, check_existing=True)
+        mat = bpy.data.materials.get("PP_SphereMat") or bpy.data.materials.new("PP_SphereMat")
+        mat.use_nodes = True
+        nt = mat.node_tree
+        assert nt is not None
+
+        # Clear nodes except output
+        for node in list(nt.nodes):
+            if node.type != "OUTPUT_MATERIAL":
+                nt.nodes.remove(node)
+
+        out = next((n for n in nt.nodes if n.type == "OUTPUT_MATERIAL"), None)
+        if out is None:
+            out = nt.nodes.new("ShaderNodeOutputMaterial")
+
+        tex = nt.nodes.new("ShaderNodeTexImage")
+        tex.image = img
+        bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
+        nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+        nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+
+        if obj.data.materials:
+            obj.data.materials[0] = mat
+        else:
+            obj.data.materials.append(mat)
+
+        self.report({"INFO"}, "Assigned preview texture to sphere")
+        return {"FINISHED"}
+
+
+class PP_OT_load_world_map(Operator):
+    bl_idname = "pp.load_world_map"
+    bl_label = "Load World Map"
+    bl_description = "Load an equirectangular (2:1) world map, infer global size, create the sphere, and assign it as preview material"
+
+    filepath: bpy.props.StringProperty(  # type: ignore[valid-type]
+        name="World Map",
+        subtype="FILE_PATH",
+        default="",
+    )
+
+    def invoke(self, context: bpy.types.Context, event: bpy.types.Event):
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context: bpy.types.Context):
+        from .. import manifest as manifest_lib
+
+        s = context.scene.projection_pasta
+        root = s.project_root_path()
+        mp = s.manifest_path()
+        if root is None or mp is None or not mp.exists():
+            self.report({"ERROR"}, "manifest.json not found (set Project Root and run Init Project)")
+            return {"CANCELLED"}
+        if not self.filepath:
+            self.report({"ERROR"}, "No world map selected")
+            return {"CANCELLED"}
+
+        # Load image to infer size
+        img = bpy.data.images.load(self.filepath, check_existing=True)
+        w, h = img.size
+        if h == 0:
+            self.report({"ERROR"}, "Invalid image size")
+            return {"CANCELLED"}
+
+        ratio = w / h
+        tol = 0.05
+        if abs(ratio - 2.0) > tol:
+            self.report({"WARNING"}, f"World map aspect ratio is {ratio:.3f} (expected ~2.0)")
+
+        # Ensure sphere exists and assign the image as preview
+        if bpy.data.objects.get(s.sphere_object_name) is None:
+            bpy.ops.pp.create_sphere()
+
+        obj = bpy.data.objects.get(s.sphere_object_name)
+        if obj is None or obj.type != "MESH":
+            self.report({"ERROR"}, "Sphere creation failed")
+            return {"CANCELLED"}
+
+        # Material assignment (similar to PP_OT_assign_preview_texture)
+        mat = bpy.data.materials.get("PP_SphereMat") or bpy.data.materials.new("PP_SphereMat")
+        mat.use_nodes = True
+        nt = mat.node_tree
+        assert nt is not None
+        for node in list(nt.nodes):
+            if node.type != "OUTPUT_MATERIAL":
+                nt.nodes.remove(node)
+        out = next((n for n in nt.nodes if n.type == "OUTPUT_MATERIAL"), None)
+        if out is None:
+            out = nt.nodes.new("ShaderNodeOutputMaterial")
+        tex = nt.nodes.new("ShaderNodeTexImage")
+        tex.image = img
+        bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
+        nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+        nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+        if obj.data.materials:
+            obj.data.materials[0] = mat
+        else:
+            obj.data.materials.append(mat)
+
+        # Update manifest global size and store world_map path; also add as a layer if missing
+        manifest = manifest_lib.read_manifest(mp)
+        manifest.setdefault("global", {}).setdefault("projection", "Equirectangular")
+        manifest["global"]["size"] = [int(w), int(h)]
+        manifest.setdefault("global", {})["world_map"] = {
+            "path": self.filepath,
+            "size": [int(w), int(h)],
+            "aspect_ratio": ratio,
+            "aspect_ratio_ok": abs(ratio - 2.0) <= tol,
+            "tolerance": tol,
+        }
+        layers = manifest["global"].setdefault("layers", [])
+        already = any(l.get("id") == "color_map" for l in layers)
+        if not already:
+            # Best-effort format inference
+            ext = Path(self.filepath).suffix.lower()
+            fmt = "PNG" if ext == ".png" else ("JPEG" if ext in (".jpg", ".jpeg") else "PNG")
+            layers.append(
+                {
+                    "id": "color_map",
+                    "path": self.filepath,
+                    "datatype": "continuous",
+                    "format": fmt,
+                    "interp": "linear",
+                }
+            )
+        manifest_lib.write_manifest(mp, manifest)
+
+        self.report({"INFO"}, f"Loaded world map ({w}x{h}) and assigned to sphere")
+        return {"FINISHED"}
+
+
+class PP_OT_expand_selection(Operator):
+    bl_idname = "pp.expand_selection"
+    bl_label = "Expand Face Selection"
+    bl_description = "Expand the current face selection by N rings (Edit Mode only)"
+
+    def execute(self, context: bpy.types.Context):
+        s = context.scene.projection_pasta
+        bm = _get_edit_bmesh(context)
+        if bm is None:
+            self.report({"ERROR"}, "Must be in Edit Mode with a mesh active")
+            return {"CANCELLED"}
+
+        for _ in range(int(s.expand_selection_rings)):
+            boundary = [f for f in bm.faces if f.select]
+            for f in boundary:
+                for e in f.edges:
+                    for f2 in e.link_faces:
+                        f2.select = True
+
+        bmesh.update_edit_mesh(context.active_object.data)
+        return {"FINISHED"}
+
+
+_CLASSES = (
+    PP_OT_create_sphere,
+    PP_OT_assign_preview_texture,
+    PP_OT_load_world_map,
+    PP_OT_expand_selection,
+)
+
+
+def register() -> None:
+    for c in _CLASSES:
+        bpy.utils.register_class(c)
+
+
+def unregister() -> None:
+    for c in reversed(_CLASSES):
+        bpy.utils.unregister_class(c)
+
+

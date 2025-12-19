@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.DS_Store
+Thumbs.db
+
+# Blender artifacts
+*.blend1
+*.blend2
+*.blend@
+
+# Local packaging outputs
+blender_addons/*.zip
+
+
