@@ -18,6 +18,35 @@ def _get_edit_bmesh(context: bpy.types.Context) -> bmesh.types.BMesh | None:
     return bmesh.from_edit_mesh(obj.data)
 
 
+def _sock_by_name(sock_collection, name: str):
+    try:
+        return sock_collection.get(name)
+    except Exception:
+        return None
+
+
+def _first_shader_output(node: bpy.types.Node):
+    # Prefer named shader outputs, otherwise first SHADER socket.
+    for n in ("BSDF", "Shader", "Emission"):
+        s = _sock_by_name(node.outputs, n)
+        if s is not None:
+            return s
+    for s in node.outputs:
+        try:
+            if s.type == "SHADER":
+                return s
+        except Exception:
+            continue
+    return node.outputs[0] if len(node.outputs) else None
+
+
+def _surface_input(output_node: bpy.types.Node):
+    s = _sock_by_name(output_node.inputs, "Surface")
+    if s is not None:
+        return s
+    return output_node.inputs[0] if len(output_node.inputs) else None
+
+
 def _ensure_sphere_material(
     *,
     obj: bpy.types.Object,
@@ -41,8 +70,10 @@ def _ensure_sphere_material(
     # Clear any existing links into Material Output (especially Surface) so we always
     # end with a connected shader even if Blender/node tree state is odd.
     try:
-        for l in list(out.inputs[0].links):
-            nt.links.remove(l)
+        surf_in = _surface_input(out)
+        if surf_in is not None:
+            for l in list(surf_in.links):
+                nt.links.remove(l)
     except Exception:
         pass
 
@@ -56,9 +87,10 @@ def _ensure_sphere_material(
     bsdf.inputs["Emission Strength"].default_value = 0.0
     nt.links.new(tex_world.outputs["Color"], bsdf.inputs["Base Color"])
 
-    final_shader = bsdf.outputs[0]
+    final_shader = _first_shader_output(bsdf)
 
     if overlay_path is not None and overlay_path.exists():
+        print(f"[Project-R] Wiring overlay emission from {overlay_path}")
         overlay_img = bpy.data.images.load(str(overlay_path), check_existing=True)
         overlay_img.colorspace_settings.name = "Raw"
 
@@ -87,12 +119,31 @@ def _ensure_sphere_material(
 
         add = nt.nodes.new("ShaderNodeAddShader")
         add.name = "PP_AddOverlay"
-        nt.links.new(bsdf.outputs[0], add.inputs[0])
-        nt.links.new(emission.outputs[0], add.inputs[1])
-        final_shader = add.outputs[0]
+        bsdf_out = _first_shader_output(bsdf)
+        em_out = _first_shader_output(emission)
+        if bsdf_out is not None:
+            nt.links.new(bsdf_out, add.inputs[0])
+        if em_out is not None:
+            nt.links.new(em_out, add.inputs[1])
+        final_shader = _first_shader_output(add)
 
-    # Always connect final shader to output (index-based to be Blender-version-safe)
-    nt.links.new(final_shader, out.inputs[0])
+    # Always connect final shader to output (name/type safe across Blender versions)
+    surf_in = _surface_input(out)
+    if final_shader is not None and surf_in is not None:
+        try:
+            nt.links.new(final_shader, surf_in)
+        except Exception as e:
+            print("[Project-R] Failed to link shader to Material Output:", e)
+
+    # Final safety: if still not linked, try direct BSDF -> Surface
+    try:
+        surf_in = _surface_input(out)
+        if surf_in is not None and not surf_in.is_linked:
+            bsdf_out = _first_shader_output(bsdf)
+            if bsdf_out is not None:
+                nt.links.new(bsdf_out, surf_in)
+    except Exception:
+        pass
 
     if obj.data.materials:
         obj.data.materials[0] = mat
