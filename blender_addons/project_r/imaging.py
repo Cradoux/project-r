@@ -24,7 +24,11 @@ def load_image(path: Path) -> ImageBuffer:
         w, h = img.size
         c = img.channels
         arr = np.array(img.pixels[:], dtype=np.float32)
+        # Blender's Image.pixels is stored bottom-to-top, while PIL/numpy images
+        # (and projectionpasta) are typically treated as top-to-bottom.
+        # Normalize to top-to-bottom here so reprojection math matches PIL.
         arr = arr.reshape((h, w, c))
+        arr = np.flip(arr, axis=0)
         return ImageBuffer(width=w, height=h, channels=c, pixels=arr)
     finally:
         # Avoid accumulating data blocks
@@ -72,6 +76,9 @@ def save_image(
             rgb = px[:, :, :3] if px.shape[2] >= 3 else np.zeros((buf.height, buf.width, 3), dtype=np.float32)
             a = np.ones((buf.height, buf.width, 1), dtype=np.float32)
             rgba = np.concatenate([rgb, a], axis=2)
+
+        # Convert from our normalized top-to-bottom back to Blender's bottom-to-top.
+        rgba = np.flip(rgba, axis=0)
 
         flat = rgba.reshape((-1,))
         img.pixels.foreach_set(flat)
