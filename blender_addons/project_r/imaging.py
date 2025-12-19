@@ -313,3 +313,49 @@ def paint_uv_triangles_on_overlay(
     return out
 
 
+def paint_uv_circles_on_overlay(
+    overlay_rgba_u8: "np.ndarray",
+    *,
+    centers_uv: list[tuple[float, float]],
+    radius_px: int,
+    color_rgba_u8: tuple[int, int, int, int],
+) -> "np.ndarray":
+    """
+    Paint circles (markers) centered at UVs onto an RGBA overlay.
+
+    - overlay is top-to-bottom (image coordinates) shape (H,W,4), uint8.
+    - UVs are in [0,1] with v=0 at bottom (Blender UV convention).
+    - Handles U seam by duplicating circles that cross the seam.
+    """
+    try:
+        from PIL import Image as PILImage  # type: ignore
+        from PIL import ImageDraw  # type: ignore
+    except Exception as e:
+        raise RuntimeError("Pillow is required for overlay rendering") from e
+
+    radius_px = max(1, int(radius_px))
+    h, w = int(overlay_rgba_u8.shape[0]), int(overlay_rgba_u8.shape[1])
+    base = PILImage.fromarray(overlay_rgba_u8, mode="RGBA")
+    draw = ImageDraw.Draw(base, "RGBA")
+
+    def draw_one(u: float, v: float) -> None:
+        x = u * w
+        y = (1.0 - v) * h
+        r = radius_px
+        draw.ellipse((x - r, y - r, x + r, y + r), fill=color_rgba_u8)
+
+    seam_u = radius_px / float(w)
+    for (u, v) in centers_uv:
+        u = float(u) % 1.0
+        v = float(v)
+        draw_one(u, v)
+        # Duplicate across seam if circle would wrap.
+        if u < seam_u:
+            draw_one(u + 1.0, v)
+        elif u > 1.0 - seam_u:
+            draw_one(u - 1.0, v)
+
+    out = np.asarray(base, dtype=np.uint8)
+    return out
+
+

@@ -92,6 +92,36 @@ def _gather_uv_triangles_for_faces(
     return tris
 
 
+def _face_uv_center(loop_uvs: list[tuple[float, float]]) -> tuple[float, float]:
+    us = [u for (u, _) in loop_uvs]
+    vs = [v for (_, v) in loop_uvs]
+    if not us:
+        return (0.0, 0.0)
+    if max(us) - min(us) > 0.5:
+        # Seam-crossing face: shift low-u up for averaging.
+        us2 = [u + (1.0 if u < 0.5 else 0.0) for u in us]
+        u = (sum(us2) / len(us2)) % 1.0
+    else:
+        u = (sum(us) / len(us)) % 1.0
+    v = sum(vs) / len(vs)
+    return (u, v)
+
+
+def _gather_uv_centers_for_faces(
+    bm: bmesh.types.BMesh,
+    faces: set[bmesh.types.BMFace],
+    uv_layer,
+) -> list[tuple[float, float]]:
+    centers: list[tuple[float, float]] = []
+    for f in faces:
+        luv = []
+        for loop in f.loops:
+            u, v = loop[uv_layer].uv
+            luv.append((float(u), float(v)))
+        centers.append(_face_uv_center(luv))
+    return centers
+
+
 def _compute_crop_rect(
     *,
     lonlats: List[geo.LonLat],
@@ -185,7 +215,7 @@ class PP_OT_create_section(bpy.types.Operator):
                     seed_faces = {f for f in bm.faces if f.select}
                     grown_faces = _grow_faces(seed_faces, int(s.expand_selection_rings))
 
-                    tris_uv = _gather_uv_triangles_for_faces(bm, grown_faces, uv_layer)
+                    centers_uv = _gather_uv_centers_for_faces(bm, grown_faces, uv_layer)
 
                     # Deterministic per-section color
                     rr = random.Random(sec_id)
@@ -200,9 +230,12 @@ class PP_OT_create_section(bpy.types.Operator):
                     overlay_path = (root / overlay_rel).resolve()
                     ow, oh = int(global_size[0]), int(global_size[1])
                     overlay = imaging.load_or_create_overlay_rgba_u8(overlay_path, (ow, oh))
-                    overlay = imaging.paint_uv_triangles_on_overlay(
+                    # Draw markers at face centers instead of filling faces.
+                    radius_px = max(2, int(min(ow, oh) / 512))
+                    overlay = imaging.paint_uv_circles_on_overlay(
                         overlay,
-                        triangles_uv=tris_uv,
+                        centers_uv=centers_uv,
+                        radius_px=radius_px,
                         color_rgba_u8=col,
                     )
                     imaging.save_overlay_rgba_u8(overlay_path, overlay)
@@ -232,7 +265,10 @@ class PP_OT_create_section(bpy.types.Operator):
         else:
             # If we created/updated overlay info, ensure the sphere material is wired to show it.
             try:
-                sphere_ops.ensure_overlay_connected(context)
+                if "overlay_path" in locals():
+                    sphere_ops.ensure_overlay_connected_with_paths(context, overlay_path=overlay_path)
+                else:
+                    sphere_ops.ensure_overlay_connected(context)
             except Exception:
                 pass
 

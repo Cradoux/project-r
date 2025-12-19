@@ -57,7 +57,10 @@ def _ensure_sphere_material(
         tex_overlay.label = "Extracted Overlay"
         tex_overlay.image = overlay_img
 
-        # Emission = overlay color, strength = overlay alpha * user opacity
+        # Overlay drives BOTH:
+        # - Principled emission (Emission Color + Strength)
+        # - An Emission shader node (Color + Strength) added onto the surface
+        # This matches the expectation of “plug into emission and emission color”.
         nt.links.new(tex_overlay.outputs["Color"], bsdf.inputs["Emission Color"])
         mul = nt.nodes.new("ShaderNodeMath")
         mul.name = "PP_OverlayMul"
@@ -66,6 +69,23 @@ def _ensure_sphere_material(
 
         nt.links.new(tex_overlay.outputs["Alpha"], mul.inputs[0])
         nt.links.new(mul.outputs["Value"], bsdf.inputs["Emission Strength"])
+
+        emission = nt.nodes.new("ShaderNodeEmission")
+        emission.name = "PP_OverlayEmission"
+        nt.links.new(tex_overlay.outputs["Color"], emission.inputs["Color"])
+        nt.links.new(mul.outputs["Value"], emission.inputs["Strength"])
+
+        add = nt.nodes.new("ShaderNodeAddShader")
+        add.name = "PP_AddOverlay"
+        nt.links.new(bsdf.outputs["BSDF"], add.inputs[0])
+        nt.links.new(emission.outputs["Emission"], add.inputs[1])
+        nt.links.new(add.outputs["Shader"], out.inputs["Surface"])
+        # We've already connected surface via add, so return early.
+        if obj.data.materials:
+            obj.data.materials[0] = mat
+        else:
+            obj.data.materials.append(mat)
+        return
 
     nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
 
@@ -113,6 +133,42 @@ def ensure_overlay_connected(context: bpy.types.Context) -> None:
     overlay = manifest.get("global", {}).get("overlay")
     if overlay and overlay.get("path"):
         overlay_path = (root / overlay["path"]).resolve()
+
+    _ensure_sphere_material(obj=obj, world_image=world_img, overlay_path=overlay_path)
+
+
+def ensure_overlay_connected_with_paths(
+    context: bpy.types.Context,
+    *,
+    overlay_path: Path,
+) -> None:
+    """
+    Like ensure_overlay_connected(), but uses a known overlay path (e.g. freshly written)
+    so we don't depend on manifest.json being updated yet.
+    """
+    s = context.scene.projection_pasta
+    obj = bpy.data.objects.get(s.sphere_object_name)
+    if obj is None or obj.type != "MESH":
+        return
+
+    world_img = None
+    mat = bpy.data.materials.get("PP_SphereMat")
+    if mat and mat.use_nodes and mat.node_tree:
+        node = mat.node_tree.nodes.get("PP_WorldTex")
+        if node and getattr(node, "image", None) is not None:
+            world_img = node.image
+
+    if world_img is None:
+        root = s.project_root_path()
+        mp = s.manifest_path()
+        if root is None or mp is None or not mp.exists():
+            return
+        manifest = manifest_lib.read_manifest(mp)
+        world_map = manifest.get("global", {}).get("world_map", {}) or {}
+        world_path = world_map.get("path")
+        if not world_path:
+            return
+        world_img = bpy.data.images.load(world_path, check_existing=True)
 
     _ensure_sphere_material(obj=obj, world_image=world_img, overlay_path=overlay_path)
 
