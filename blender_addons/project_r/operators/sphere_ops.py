@@ -38,6 +38,14 @@ def _ensure_sphere_material(
     if out is None:
         out = nt.nodes.new("ShaderNodeOutputMaterial")
 
+    # Clear any existing links into Material Output (especially Surface) so we always
+    # end with a connected shader even if Blender/node tree state is odd.
+    try:
+        for l in list(out.inputs[0].links):
+            nt.links.remove(l)
+    except Exception:
+        pass
+
     tex_world = nt.nodes.new("ShaderNodeTexImage")
     tex_world.name = "PP_WorldTex"
     tex_world.label = "World Map"
@@ -47,6 +55,8 @@ def _ensure_sphere_material(
     bsdf.name = "PP_BSDF"
     bsdf.inputs["Emission Strength"].default_value = 0.0
     nt.links.new(tex_world.outputs["Color"], bsdf.inputs["Base Color"])
+
+    final_shader = bsdf.outputs[0]
 
     if overlay_path is not None and overlay_path.exists():
         overlay_img = bpy.data.images.load(str(overlay_path), check_existing=True)
@@ -77,17 +87,12 @@ def _ensure_sphere_material(
 
         add = nt.nodes.new("ShaderNodeAddShader")
         add.name = "PP_AddOverlay"
-        nt.links.new(bsdf.outputs["BSDF"], add.inputs[0])
-        nt.links.new(emission.outputs["Emission"], add.inputs[1])
-        nt.links.new(add.outputs["Shader"], out.inputs["Surface"])
-        # We've already connected surface via add, so return early.
-        if obj.data.materials:
-            obj.data.materials[0] = mat
-        else:
-            obj.data.materials.append(mat)
-        return
+        nt.links.new(bsdf.outputs[0], add.inputs[0])
+        nt.links.new(emission.outputs[0], add.inputs[1])
+        final_shader = add.outputs[0]
 
-    nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+    # Always connect final shader to output (index-based to be Blender-version-safe)
+    nt.links.new(final_shader, out.inputs[0])
 
     if obj.data.materials:
         obj.data.materials[0] = mat
