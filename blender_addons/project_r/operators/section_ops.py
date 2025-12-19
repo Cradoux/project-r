@@ -16,6 +16,7 @@ from .. import imaging
 from .. import manifest as manifest_lib
 from ..projection_backend import ProjectionParams, project_equirect_to_hammer
 from ..vendor.projectionpasta import projectionpasta as pp
+from . import sphere_ops
 
 
 def _selected_uv_lonlats(context: bpy.types.Context) -> List[geo.LonLat]:
@@ -228,6 +229,12 @@ class PP_OT_create_section(bpy.types.Operator):
                 overlay_color_rgba = None
         except Exception:
             overlay_color_rgba = None
+        else:
+            # If we created/updated overlay info, ensure the sphere material is wired to show it.
+            try:
+                sphere_ops.ensure_overlay_connected(context)
+            except Exception:
+                pass
 
         full_w = int(s.hammer_full_width)
         full_h = int(s.hammer_full_height)

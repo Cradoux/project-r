@@ -86,6 +86,37 @@ def update_overlay_opacity(opacity: float) -> None:
     mul.inputs[1].default_value = float(opacity)
 
 
+def ensure_overlay_connected(context: bpy.types.Context) -> None:
+    """
+    Ensure the sphere material includes the extracted overlay connected to Emission.
+    Safe to call repeatedly.
+    """
+    s = context.scene.projection_pasta
+    root = s.project_root_path()
+    mp = s.manifest_path()
+    if root is None or mp is None or not mp.exists():
+        return
+
+    obj = bpy.data.objects.get(s.sphere_object_name)
+    if obj is None or obj.type != "MESH":
+        return
+
+    manifest = manifest_lib.read_manifest(mp)
+    world_map = manifest.get("global", {}).get("world_map", {}) or {}
+    world_path = world_map.get("path")
+    if not world_path:
+        return
+
+    world_img = bpy.data.images.load(world_path, check_existing=True)
+
+    overlay_path = None
+    overlay = manifest.get("global", {}).get("overlay")
+    if overlay and overlay.get("path"):
+        overlay_path = (root / overlay["path"]).resolve()
+
+    _ensure_sphere_material(obj=obj, world_image=world_img, overlay_path=overlay_path)
+
+
 class PP_OT_create_sphere(Operator):
     bl_idname = "pp.create_sphere"
     bl_label = "Create Projection Sphere"
