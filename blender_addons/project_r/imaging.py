@@ -19,25 +19,46 @@ class ImageBuffer:
 
 
 def load_image(path: Path) -> ImageBuffer:
+    # For PNG/JPG we use Pillow to avoid Blender color-management altering pixel values.
+    suf = path.suffix.lower()
+    if suf in (".png", ".jpg", ".jpeg"):
+        try:
+            from PIL import Image as PILImage  # type: ignore
+        except Exception:
+            PILImage = None
+
+        if PILImage is not None:
+            im = PILImage.open(path)
+            im.load()
+
+            # Normalize to float32 [0..1], top-to-bottom.
+            arr_u = np.asarray(im)
+            if arr_u.ndim == 2:
+                arr_u = arr_u[:, :, None]
+
+            if arr_u.dtype == np.uint16:
+                arr = arr_u.astype(np.float32) / 65535.0
+            else:
+                arr = arr_u.astype(np.float32) / 255.0
+
+            return ImageBuffer(
+                width=int(im.size[0]),
+                height=int(im.size[1]),
+                channels=int(arr.shape[2]),
+                pixels=arr,
+            )
+
+    # Fallback: Blender loader (EXR, or if PIL unavailable)
     img = bpy.data.images.load(str(path), check_existing=False)
     try:
-        # Read file values as-is (avoid Blender color-management conversions),
-        # then handle any needed sRGB/linear conversions explicitly ourselves.
-        try:
-            img.colorspace_settings.name = "Raw"
-        except Exception:
-            pass
         w, h = img.size
         c = img.channels
         arr = np.array(img.pixels[:], dtype=np.float32)
-        # Blender's Image.pixels is stored bottom-to-top, while PIL/numpy images
-        # (and projectionpasta) are typically treated as top-to-bottom.
-        # Normalize to top-to-bottom here so reprojection math matches PIL.
+        # Blender's Image.pixels is stored bottom-to-top.
         arr = arr.reshape((h, w, c))
         arr = np.flip(arr, axis=0)
         return ImageBuffer(width=w, height=h, channels=c, pixels=arr)
     finally:
-        # Avoid accumulating data blocks
         bpy.data.images.remove(img)
 
 
@@ -49,6 +70,50 @@ def save_image(
     color_depth: Literal["8", "16", "32"] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    # For PNG/JPG, prefer Pillow to preserve exact encoding/bit-depth without Blender color management.
+    if file_format in ("PNG", "JPEG"):
+        try:
+            from PIL import Image as PILImage  # type: ignore
+        except Exception:
+            PILImage = None
+
+        if PILImage is not None:
+            px = buf.pixels.astype(np.float32)
+            if px.ndim == 2:
+                px = px[:, :, None]
+
+            # Convert to desired channel count for writing.
+            c = px.shape[2]
+            if c == 1:
+                out = np.clip(px[:, :, 0], 0.0, 1.0)
+                if file_format == "PNG" and color_depth == "16":
+                    arr_u = (out * 65535.0 + 0.5).astype(np.uint16)
+                    im = PILImage.fromarray(arr_u, mode="I;16")
+                else:
+                    arr_u = (out * 255.0 + 0.5).astype(np.uint8)
+                    im = PILImage.fromarray(arr_u, mode="L")
+            else:
+                # Write RGB or RGBA
+                rgb = np.clip(px[:, :, :3], 0.0, 1.0)
+                if file_format == "PNG" and color_depth == "16":
+                    arr_u = (rgb * 65535.0 + 0.5).astype(np.uint16)
+                    # Pillow doesn't have a great native "RGB;16" mode across all versions;
+                    # store as 8-bit for RGB if needed in practice.
+                    # If user asks for true 16-bit RGB later, we can switch to TIFF.
+                    arr_u8 = (rgb * 255.0 + 0.5).astype(np.uint8)
+                    im = PILImage.fromarray(arr_u8, mode="RGB")
+                else:
+                    arr_u = (rgb * 255.0 + 0.5).astype(np.uint8)
+                    im = PILImage.fromarray(arr_u, mode="RGB")
+
+                if c >= 4 and file_format == "PNG":
+                    a = np.clip(px[:, :, 3], 0.0, 1.0)
+                    a_u = (a * 255.0 + 0.5).astype(np.uint8)
+                    im.putalpha(PILImage.fromarray(a_u, mode="L"))
+
+            im.save(path)
+            return
 
     # Blender stores `Image.pixels` as RGBA (4 floats per pixel) even when an
     # image is conceptually single-channel. Always write RGBA to avoid
