@@ -6,6 +6,8 @@ import bpy
 import bmesh
 from bpy.types import Operator
 
+from .. import manifest as manifest_lib
+
 
 def _get_edit_bmesh(context: bpy.types.Context) -> bmesh.types.BMesh | None:
     obj = context.active_object
@@ -14,6 +16,57 @@ def _get_edit_bmesh(context: bpy.types.Context) -> bmesh.types.BMesh | None:
     if context.mode != "EDIT_MESH":
         return None
     return bmesh.from_edit_mesh(obj.data)
+
+
+def _ensure_sphere_material(
+    *,
+    obj: bpy.types.Object,
+    world_image: bpy.types.Image,
+    overlay_path: Path | None,
+) -> None:
+    mat = bpy.data.materials.get("PP_SphereMat") or bpy.data.materials.new("PP_SphereMat")
+    mat.use_nodes = True
+    nt = mat.node_tree
+    assert nt is not None
+
+    # Clear nodes except output
+    for node in list(nt.nodes):
+        if node.type != "OUTPUT_MATERIAL":
+            nt.nodes.remove(node)
+
+    out = next((n for n in nt.nodes if n.type == "OUTPUT_MATERIAL"), None)
+    if out is None:
+        out = nt.nodes.new("ShaderNodeOutputMaterial")
+
+    tex_world = nt.nodes.new("ShaderNodeTexImage")
+    tex_world.name = "PP_WorldTex"
+    tex_world.label = "World Map"
+    tex_world.image = world_image
+
+    bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
+    bsdf.name = "PP_BSDF"
+    bsdf.inputs["Emission Strength"].default_value = 0.0
+    nt.links.new(tex_world.outputs["Color"], bsdf.inputs["Base Color"])
+
+    if overlay_path is not None and overlay_path.exists():
+        overlay_img = bpy.data.images.load(str(overlay_path), check_existing=True)
+        overlay_img.colorspace_settings.name = "Raw"
+
+        tex_overlay = nt.nodes.new("ShaderNodeTexImage")
+        tex_overlay.name = "PP_OverlayTex"
+        tex_overlay.label = "Extracted Overlay"
+        tex_overlay.image = overlay_img
+
+        # Emission = overlay color, strength = overlay alpha (so transparent = off)
+        nt.links.new(tex_overlay.outputs["Color"], bsdf.inputs["Emission Color"])
+        nt.links.new(tex_overlay.outputs["Alpha"], bsdf.inputs["Emission Strength"])
+
+    nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+
+    if obj.data.materials:
+        obj.data.materials[0] = mat
+    else:
+        obj.data.materials.append(mat)
 
 
 class PP_OT_create_sphere(Operator):
@@ -74,30 +127,7 @@ class PP_OT_assign_preview_texture(Operator):
             return {"CANCELLED"}
 
         img = bpy.data.images.load(self.filepath, check_existing=True)
-        mat = bpy.data.materials.get("PP_SphereMat") or bpy.data.materials.new("PP_SphereMat")
-        mat.use_nodes = True
-        nt = mat.node_tree
-        assert nt is not None
-
-        # Clear nodes except output
-        for node in list(nt.nodes):
-            if node.type != "OUTPUT_MATERIAL":
-                nt.nodes.remove(node)
-
-        out = next((n for n in nt.nodes if n.type == "OUTPUT_MATERIAL"), None)
-        if out is None:
-            out = nt.nodes.new("ShaderNodeOutputMaterial")
-
-        tex = nt.nodes.new("ShaderNodeTexImage")
-        tex.image = img
-        bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
-        nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
-        nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
-
-        if obj.data.materials:
-            obj.data.materials[0] = mat
-        else:
-            obj.data.materials.append(mat)
+        _ensure_sphere_material(obj=obj, world_image=img, overlay_path=None)
 
         self.report({"INFO"}, "Assigned preview texture to sphere")
         return {"FINISHED"}
@@ -119,8 +149,6 @@ class PP_OT_load_world_map(Operator):
         return {"RUNNING_MODAL"}
 
     def execute(self, context: bpy.types.Context):
-        from .. import manifest as manifest_lib
-
         s = context.scene.projection_pasta
         root = s.project_root_path()
         mp = s.manifest_path()
@@ -152,27 +180,6 @@ class PP_OT_load_world_map(Operator):
             self.report({"ERROR"}, "Sphere creation failed")
             return {"CANCELLED"}
 
-        # Material assignment (similar to PP_OT_assign_preview_texture)
-        mat = bpy.data.materials.get("PP_SphereMat") or bpy.data.materials.new("PP_SphereMat")
-        mat.use_nodes = True
-        nt = mat.node_tree
-        assert nt is not None
-        for node in list(nt.nodes):
-            if node.type != "OUTPUT_MATERIAL":
-                nt.nodes.remove(node)
-        out = next((n for n in nt.nodes if n.type == "OUTPUT_MATERIAL"), None)
-        if out is None:
-            out = nt.nodes.new("ShaderNodeOutputMaterial")
-        tex = nt.nodes.new("ShaderNodeTexImage")
-        tex.image = img
-        bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
-        nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
-        nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
-        if obj.data.materials:
-            obj.data.materials[0] = mat
-        else:
-            obj.data.materials.append(mat)
-
         # Update manifest global size and store world_map path; also add as a layer if missing
         manifest = manifest_lib.read_manifest(mp)
         manifest.setdefault("global", {}).setdefault("projection", "Equirectangular")
@@ -200,6 +207,16 @@ class PP_OT_load_world_map(Operator):
                 }
             )
         manifest_lib.write_manifest(mp, manifest)
+
+        overlay_path = None
+        try:
+            overlay = manifest.get("global", {}).get("overlay")
+            if overlay and overlay.get("path"):
+                overlay_path = (root / overlay["path"]).resolve()
+        except Exception:
+            overlay_path = None
+
+        _ensure_sphere_material(obj=obj, world_image=img, overlay_path=overlay_path)
 
         self.report({"INFO"}, f"Loaded world map ({w}x{h}) and assigned to sphere")
         return {"FINISHED"}

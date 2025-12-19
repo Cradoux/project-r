@@ -217,3 +217,99 @@ def make_feather_weight_mask(width: int, height: int, feather_px: int) -> ImageB
     return ImageBuffer(width=width, height=height, channels=1, pixels=w[..., None])
 
 
+def load_or_create_overlay_rgba_u8(path: Path, size: Tuple[int, int]) -> "np.ndarray":
+    """
+    Load an RGBA overlay PNG (uint8) or create a transparent one if missing.
+    Array is returned top-to-bottom with shape (H, W, 4).
+    """
+    w, h = int(size[0]), int(size[1])
+    try:
+        from PIL import Image as PILImage  # type: ignore
+    except Exception as e:
+        raise RuntimeError("Pillow is required for overlay rendering") from e
+
+    if path.exists():
+        im = PILImage.open(path).convert("RGBA")
+        if im.size != (w, h):
+            # Size mismatch: recreate to avoid misaligned UV mapping.
+            im = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
+    else:
+        im = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
+
+    arr = np.asarray(im, dtype=np.uint8)
+    return arr
+
+
+def save_overlay_rgba_u8(path: Path, rgba: "np.ndarray") -> None:
+    """
+    Save an RGBA uint8 array (H,W,4) as PNG.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        from PIL import Image as PILImage  # type: ignore
+    except Exception as e:
+        raise RuntimeError("Pillow is required for overlay rendering") from e
+
+    im = PILImage.fromarray(rgba, mode="RGBA")
+    im.save(path)
+
+
+def paint_uv_triangles_on_overlay(
+    overlay_rgba_u8: "np.ndarray",
+    *,
+    triangles_uv: list[tuple[tuple[float, float], tuple[float, float], tuple[float, float]]],
+    color_rgba_u8: tuple[int, int, int, int],
+) -> "np.ndarray":
+    """
+    Paint UV triangles onto an RGBA overlay.
+
+    - overlay is top-to-bottom (image coordinates) shape (H,W,4), uint8.
+    - UVs are in [0,1] with v=0 at bottom (Blender UV convention).
+    - Handles U seam by drawing wrapped triangles when span crosses the seam.
+    """
+    try:
+        from PIL import Image as PILImage  # type: ignore
+        from PIL import ImageDraw  # type: ignore
+    except Exception as e:
+        raise RuntimeError("Pillow is required for overlay rendering") from e
+
+    h, w = int(overlay_rgba_u8.shape[0]), int(overlay_rgba_u8.shape[1])
+    base = PILImage.fromarray(overlay_rgba_u8, mode="RGBA")
+    draw = ImageDraw.Draw(base, "RGBA")
+
+    def uv_to_xy(u: float, v: float) -> tuple[float, float]:
+        # PIL image coords: origin top-left; Blender UV v=0 is bottom.
+        x = u * w
+        y = (1.0 - v) * h
+        return (x, y)
+
+    for tri in triangles_uv:
+        (u0, v0), (u1, v1), (u2, v2) = tri
+        us = [u0, u1, u2]
+        span = max(us) - min(us)
+
+        if span > 0.5:
+            # Draw both shifted variants to cover across the seam.
+            # Variant A: shift low-u up by +1 (draws on right side)
+            tri_a = []
+            for (u, v) in tri:
+                if u < 0.5:
+                    u += 1.0
+                tri_a.append(uv_to_xy(u, v))
+            draw.polygon(tri_a, fill=color_rgba_u8)
+
+            # Variant B: shift high-u down by -1 (draws on left side)
+            tri_b = []
+            for (u, v) in tri:
+                if u > 0.5:
+                    u -= 1.0
+                tri_b.append(uv_to_xy(u, v))
+            draw.polygon(tri_b, fill=color_rgba_u8)
+        else:
+            pts = [uv_to_xy(u0, v0), uv_to_xy(u1, v1), uv_to_xy(u2, v2)]
+            draw.polygon(pts, fill=color_rgba_u8)
+
+    out = np.asarray(base, dtype=np.uint8)
+    return out
+
+

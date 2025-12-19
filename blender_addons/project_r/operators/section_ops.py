@@ -9,6 +9,7 @@ from typing import List, Tuple
 import bpy
 import bmesh
 import numpy as np
+import random
 
 from .. import geo
 from .. import imaging
@@ -51,6 +52,43 @@ def _selected_face_indices(context: bpy.types.Context) -> List[int]:
         return []
     bm = bmesh.from_edit_mesh(obj.data)
     return [int(f.index) for f in bm.faces if f.select]
+
+
+def _grow_faces(seed: set[bmesh.types.BMFace], rings: int) -> set[bmesh.types.BMFace]:
+    rings = max(0, int(rings))
+    grown: set[bmesh.types.BMFace] = set(seed)
+    frontier: set[bmesh.types.BMFace] = set(seed)
+    for _ in range(rings):
+        new_frontier: set[bmesh.types.BMFace] = set()
+        for f in frontier:
+            for e in f.edges:
+                for nb in e.link_faces:
+                    if nb not in grown:
+                        grown.add(nb)
+                        new_frontier.add(nb)
+        frontier = new_frontier
+        if not frontier:
+            break
+    return grown
+
+
+def _gather_uv_triangles_for_faces(
+    bm: bmesh.types.BMesh,
+    faces: set[bmesh.types.BMFace],
+    uv_layer,
+) -> list[tuple[tuple[float, float], tuple[float, float], tuple[float, float]]]:
+    tris: list[tuple[tuple[float, float], tuple[float, float], tuple[float, float]]] = []
+    for f in faces:
+        loops = list(f.loops)
+        if len(loops) < 3:
+            continue
+        u0, v0 = loops[0][uv_layer].uv
+        p0 = (float(u0), float(v0))
+        for i in range(1, len(loops) - 1):
+            u1, v1 = loops[i][uv_layer].uv
+            u2, v2 = loops[i + 1][uv_layer].uv
+            tris.append((p0, (float(u1), float(v1)), (float(u2), float(v2))))
+    return tris
 
 
 def _compute_crop_rect(
@@ -135,6 +173,61 @@ class PP_OT_create_section(bpy.types.Operator):
         sec_id = f"sec_{len(manifest.get('sections', [])) + 1:03d}_{s.new_section_name.lower()}"
         (root / "sections" / sec_id).mkdir(parents=True, exist_ok=True)
         (root / "processed" / sec_id).mkdir(parents=True, exist_ok=True)
+
+        # ---- Update extracted overlay (per-section color) ----
+        try:
+            obj = context.active_object
+            if obj is not None and obj.type == "MESH" and context.mode == "EDIT_MESH":
+                bm = bmesh.from_edit_mesh(obj.data)
+                uv_layer = bm.loops.layers.uv.active
+                if uv_layer is not None:
+                    seed_faces = {f for f in bm.faces if f.select}
+                    grown_faces = _grow_faces(seed_faces, int(s.expand_selection_rings))
+
+                    tris_uv = _gather_uv_triangles_for_faces(bm, grown_faces, uv_layer)
+
+                    # Deterministic per-section color
+                    rr = random.Random(sec_id)
+                    col = (
+                        int(80 + rr.random() * 175),
+                        int(80 + rr.random() * 175),
+                        int(80 + rr.random() * 175),
+                        160,  # alpha
+                    )
+
+                    overlay_rel = "project_r_overlay.png"
+                    overlay_path = (root / overlay_rel).resolve()
+                    ow, oh = int(global_size[0]), int(global_size[1])
+                    overlay = imaging.load_or_create_overlay_rgba_u8(overlay_path, (ow, oh))
+                    overlay = imaging.paint_uv_triangles_on_overlay(
+                        overlay,
+                        triangles_uv=tris_uv,
+                        color_rgba_u8=col,
+                    )
+                    imaging.save_overlay_rgba_u8(overlay_path, overlay)
+
+                    manifest.setdefault("global", {})["overlay"] = {
+                        "path": overlay_rel,
+                        "size": [ow, oh],
+                    }
+
+                    # If the overlay image is loaded in Blender, reload it so it updates on the sphere.
+                    for img in bpy.data.images:
+                        try:
+                            fp = bpy.path.abspath(img.filepath_raw)
+                        except Exception:
+                            fp = img.filepath_raw
+                        if fp and Path(fp).resolve() == overlay_path:
+                            img.reload()
+                            break
+
+                    overlay_color_rgba = [c / 255.0 for c in col]
+                else:
+                    overlay_color_rgba = None
+            else:
+                overlay_color_rgba = None
+        except Exception:
+            overlay_color_rgba = None
 
         full_w = int(s.hammer_full_width)
         full_h = int(s.hammer_full_height)
@@ -247,6 +340,7 @@ class PP_OT_create_section(bpy.types.Operator):
                     "selected_face_indices": face_indices,
                     "selection_uv_sample_count": len(lonlats),
                 },
+                "overlay_color_rgba": overlay_color_rgba,
             }
         )
 
