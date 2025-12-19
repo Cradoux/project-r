@@ -50,18 +50,35 @@ def _opts_for(dst_size: Tuple[int, int]) -> dict:
     return opts
 
 
-def _to_file_format(path: Path) -> Tuple[imaging.ImageFormat, str | None]:
+def _to_file_format(
+    path: Path,
+    *,
+    treat_as_color: bool,
+) -> Tuple[imaging.ImageFormat, str | None]:
     suf = path.suffix.lower()
     if suf == ".exr":
         return ("OPEN_EXR", "32")
     if suf == ".png":
-        # Prefer 16-bit PNG for masks/height-like data. Blender will dither down
-        # if needed, but this keeps more precision by default.
-        return ("PNG", "16")
+        # Preserve typical bit-depth expectations:
+        # - color maps: 8-bit (sRGB encoded)
+        # - non-color (masks/height-ish): 16-bit
+        return ("PNG", "8" if treat_as_color else "16")
     if suf in (".jpg", ".jpeg"):
         return ("JPEG", None)
     # default: try PNG
-    return ("PNG", "16")
+    return ("PNG", "8" if treat_as_color else "16")
+
+
+def _srgb_to_linear(x: np.ndarray) -> np.ndarray:
+    x = np.clip(x, 0.0, 1.0).astype(np.float32)
+    a = 0.055
+    return np.where(x <= 0.04045, x / 12.92, ((x + a) / (1.0 + a)) ** 2.4).astype(np.float32)
+
+
+def _linear_to_srgb(x: np.ndarray) -> np.ndarray:
+    x = np.clip(x, 0.0, 1.0).astype(np.float32)
+    a = 0.055
+    return np.where(x <= 0.0031308, x * 12.92, (1.0 + a) * (x ** (1.0 / 2.4)) - a).astype(np.float32)
 
 
 def _sample_nearest(data_in: np.ndarray, xpix: np.ndarray, ypix: np.ndarray) -> np.ndarray:
@@ -108,9 +125,15 @@ def _reproject_array(
     aspect_in_deg: Tuple[float, float, float],
     aspect_out_deg: Tuple[float, float, float],
     interp: Interp,
+    treat_as_color: bool,
 ) -> np.ndarray:
     projectionpasta = _import_projectionpasta()
     opts = _opts_for(dst_size)
+
+    # For color images: do interpolation in linear, but keep file encoding sRGB.
+    if treat_as_color and data_in.ndim == 3 and data_in.shape[2] >= 3:
+        data_in = data_in.copy()
+        data_in[..., 0:3] = _srgb_to_linear(data_in[..., 0:3])
 
     # Construct coordinate grids the same way projectionpasta does.
     h0, w0 = data_in.shape[0], data_in.shape[1]
@@ -163,6 +186,10 @@ def _reproject_array(
     else:
         out = _sample_bilinear(data_in, xpix, ypix)
 
+    if treat_as_color and out.ndim == 3 and out.shape[2] >= 3:
+        out = out.astype(np.float32, copy=False)
+        out[..., 0:3] = _linear_to_srgb(out[..., 0:3])
+
     # Preserve dtype-ish: masks might want integer-ish results.
     return out
 
@@ -173,6 +200,7 @@ def project_equirect_array_to_hammer(
     dst_size: Tuple[int, int],
     params: ProjectionParams,
     interp: Interp,
+    treat_as_color: bool = False,
 ) -> np.ndarray:
     return _reproject_array(
         data_in=data_in,
@@ -182,6 +210,7 @@ def project_equirect_array_to_hammer(
         aspect_in_deg=(0.0, 0.0, 0.0),
         aspect_out_deg=(params.center_lon_deg, params.center_lat_deg, params.rot_deg),
         interp=interp,
+        treat_as_color=treat_as_color,
     )
 
 
@@ -191,6 +220,7 @@ def project_hammer_array_to_equirect(
     dst_size: Tuple[int, int],
     params: ProjectionParams,
     interp: Interp,
+    treat_as_color: bool = False,
 ) -> np.ndarray:
     return _reproject_array(
         data_in=data_in,
@@ -200,6 +230,7 @@ def project_hammer_array_to_equirect(
         aspect_in_deg=(params.center_lon_deg, params.center_lat_deg, params.rot_deg),
         aspect_out_deg=(0.0, 0.0, 0.0),
         interp=interp,
+        treat_as_color=treat_as_color,
     )
 
 
@@ -210,6 +241,7 @@ def project_equirect_to_hammer(
     dst_size: Tuple[int, int],
     params: ProjectionParams,
     interp: Interp,
+    treat_as_color: bool = False,
 ) -> None:
     buf = imaging.load_image(src_path)
     data_in = buf.pixels
@@ -221,6 +253,7 @@ def project_equirect_to_hammer(
         aspect_in_deg=(0.0, 0.0, 0.0),
         aspect_out_deg=(params.center_lon_deg, params.center_lat_deg, params.rot_deg),
         interp=interp,
+        treat_as_color=treat_as_color,
     )
 
     out_buf = imaging.ImageBuffer(
@@ -229,7 +262,7 @@ def project_equirect_to_hammer(
         channels=buf.channels,
         pixels=out.astype(np.float32),
     )
-    fmt, depth = _to_file_format(dst_path)
+    fmt, depth = _to_file_format(dst_path, treat_as_color=treat_as_color)
     imaging.save_image(out_buf, dst_path, fmt, color_depth=depth)
 
 
@@ -240,6 +273,7 @@ def project_hammer_to_equirect(
     dst_size: Tuple[int, int],
     params: ProjectionParams,
     interp: Interp,
+    treat_as_color: bool = False,
 ) -> None:
     buf = imaging.load_image(src_path)
     data_in = buf.pixels
@@ -251,6 +285,7 @@ def project_hammer_to_equirect(
         aspect_in_deg=(params.center_lon_deg, params.center_lat_deg, params.rot_deg),
         aspect_out_deg=(0.0, 0.0, 0.0),
         interp=interp,
+        treat_as_color=treat_as_color,
     )
 
     out_buf = imaging.ImageBuffer(
@@ -259,7 +294,7 @@ def project_hammer_to_equirect(
         channels=buf.channels,
         pixels=out.astype(np.float32),
     )
-    fmt, depth = _to_file_format(dst_path)
+    fmt, depth = _to_file_format(dst_path, treat_as_color=treat_as_color)
     imaging.save_image(out_buf, dst_path, fmt, color_depth=depth)
 
 

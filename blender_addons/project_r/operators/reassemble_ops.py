@@ -95,13 +95,24 @@ class PP_OT_reassemble(bpy.types.Operator):
             n = name.lower()
             return any(k in n for k in ("mask", "land", "plates", "labels"))
 
+        def _is_height_name(name: str) -> bool:
+            n = name.lower()
+            return any(k in n for k in ("height", "elev", "dem"))
+
         def _interp_for_name(name: str) -> str:
             n = name.lower()
             if _is_mask_name(name):
                 return "nearest"
-            if any(k in n for k in ("height", "elev", "dem")):
+            if _is_height_name(name):
                 return "linear"
             return "linear"
+
+        def _treat_as_color_name(name: str) -> bool:
+            # Only apply sRGB<->linear conversions for typical color image formats.
+            if _is_mask_name(name) or _is_height_name(name):
+                return False
+            ext = Path(name).suffix.lower()
+            return ext in (".png", ".jpg", ".jpeg")
 
         out_dir = root / "reassembled"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -109,6 +120,7 @@ class PP_OT_reassemble(bpy.types.Operator):
         for fname, entries in groups.items():
             is_mask = _is_mask_name(fname)
             interp = _interp_for_name(fname)
+            treat_as_color = _treat_as_color_name(fname)
 
             # Initialize accumulators lazily based on first image's channels.
             sum_img = None
@@ -166,6 +178,7 @@ class PP_OT_reassemble(bpy.types.Operator):
                     dst_size=(gw, gh),
                     params=params,
                     interp=interp,  # type: ignore[arg-type]
+                    treat_as_color=treat_as_color,
                 )
                 w_eq = project_hammer_array_to_equirect(
                     data_in=full_weight.pixels[:, :, :1],
@@ -202,7 +215,15 @@ class PP_OT_reassemble(bpy.types.Operator):
                 denom = np.maximum(sum_w, 1e-8)
                 out = sum_img / denom
                 out_buf = imaging.ImageBuffer(width=gw, height=gh, channels=out.shape[2] if out.ndim == 3 else 1, pixels=out.astype("float32"))
-                fmt, depth = ("OPEN_EXR", "32") if out_path.suffix.lower() == ".exr" else ("PNG", None) if out_path.suffix.lower() == ".png" else ("JPEG", None) if out_path.suffix.lower() in (".jpg", ".jpeg") else ("PNG", None)
+                fmt, depth = (
+                    ("OPEN_EXR", "32")
+                    if out_path.suffix.lower() == ".exr"
+                    else ("PNG", "8" if treat_as_color else "16")
+                    if out_path.suffix.lower() == ".png"
+                    else ("JPEG", None)
+                    if out_path.suffix.lower() in (".jpg", ".jpeg")
+                    else ("PNG", "8" if treat_as_color else "16")
+                )
                 imaging.save_image(out_buf, out_path, fmt, color_depth=depth)
 
         self.report({"INFO"}, f"Reassembled {len(groups)} file(s) to {out_dir}")

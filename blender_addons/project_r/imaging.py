@@ -21,6 +21,12 @@ class ImageBuffer:
 def load_image(path: Path) -> ImageBuffer:
     img = bpy.data.images.load(str(path), check_existing=False)
     try:
+        # Read file values as-is (avoid Blender color-management conversions),
+        # then handle any needed sRGB/linear conversions explicitly ourselves.
+        try:
+            img.colorspace_settings.name = "Raw"
+        except Exception:
+            pass
         w, h = img.size
         c = img.channels
         arr = np.array(img.pixels[:], dtype=np.float32)

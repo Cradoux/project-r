@@ -1,0 +1,7 @@
+#!/bin/sh
+# Regenerate blender_addons/project_r.zip after pushing.
+# Enable with: git config core.hooksPath .githooks
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/package_addon.ps1
+
+

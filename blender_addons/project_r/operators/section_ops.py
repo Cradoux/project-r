@@ -160,6 +160,15 @@ class PP_OT_create_section(bpy.types.Operator):
                 return "linear"
             return "linear"
 
+        def _treat_as_color(layer_id: str, filename: str) -> bool:
+            name = (layer_id + " " + filename).lower()
+            if any(k in name for k in ("mask", "land", "plates", "labels")):
+                return False
+            if any(k in name for k in ("height", "elev", "dem")):
+                return False
+            # Treat typical PNG/JPG albedo-like maps as sRGB.
+            return True
+
         for layer in layers:
             layer_id = str(layer.get("id", "layer")).strip() or "layer"
             src = str(layer.get("path", "")).strip()
@@ -177,12 +186,14 @@ class PP_OT_create_section(bpy.types.Operator):
             crop_path = (root / crop_rel).resolve()
 
             interp = _interp_for_layer(layer_id, src_path.name)
+            treat_as_color = _treat_as_color(layer_id, src_path.name) and ext in (".png", ".jpg", ".jpeg")
             project_equirect_to_hammer(
                 src_path=src_path,
                 dst_path=full_path,
                 dst_size=(full_w, full_h),
                 params=params,
                 interp=interp,  # type: ignore[arg-type]
+                treat_as_color=treat_as_color,
             )
 
             full_img = imaging.load_image(full_path)
@@ -191,7 +202,7 @@ class PP_OT_create_section(bpy.types.Operator):
             fmt, depth = (
                 ("OPEN_EXR", "32")
                 if ext == ".exr"
-                else ("PNG", "16")
+                else ("PNG", "8" if treat_as_color else "16")
                 if ext == ".png"
                 else ("JPEG", None)
             )
