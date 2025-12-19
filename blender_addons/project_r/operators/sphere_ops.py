@@ -57,9 +57,15 @@ def _ensure_sphere_material(
         tex_overlay.label = "Extracted Overlay"
         tex_overlay.image = overlay_img
 
-        # Emission = overlay color, strength = overlay alpha (so transparent = off)
+        # Emission = overlay color, strength = overlay alpha * user opacity
         nt.links.new(tex_overlay.outputs["Color"], bsdf.inputs["Emission Color"])
-        nt.links.new(tex_overlay.outputs["Alpha"], bsdf.inputs["Emission Strength"])
+        mul = nt.nodes.new("ShaderNodeMath")
+        mul.name = "PP_OverlayMul"
+        mul.operation = "MULTIPLY"
+        mul.inputs[1].default_value = float(bpy.context.scene.projection_pasta.overlay_opacity)
+
+        nt.links.new(tex_overlay.outputs["Alpha"], mul.inputs[0])
+        nt.links.new(mul.outputs["Value"], bsdf.inputs["Emission Strength"])
 
     nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
 
@@ -67,6 +73,17 @@ def _ensure_sphere_material(
         obj.data.materials[0] = mat
     else:
         obj.data.materials.append(mat)
+
+
+def update_overlay_opacity(opacity: float) -> None:
+    mat = bpy.data.materials.get("PP_SphereMat")
+    if mat is None or not mat.use_nodes or mat.node_tree is None:
+        return
+    nt = mat.node_tree
+    mul = nt.nodes.get("PP_OverlayMul")
+    if mul is None or mul.type != "MATH":
+        return
+    mul.inputs[1].default_value = float(opacity)
 
 
 class PP_OT_create_sphere(Operator):
@@ -245,11 +262,22 @@ class PP_OT_expand_selection(Operator):
         return {"FINISHED"}
 
 
+class PP_OT_set_overlay_opacity(Operator):
+    bl_idname = "pp.set_overlay_opacity"
+    bl_label = "Set Overlay Opacity"
+    bl_description = "Update the extracted overlay opacity on the sphere material"
+
+    def execute(self, context: bpy.types.Context):
+        update_overlay_opacity(context.scene.projection_pasta.overlay_opacity)
+        return {"FINISHED"}
+
+
 _CLASSES = (
     PP_OT_create_sphere,
     PP_OT_assign_preview_texture,
     PP_OT_load_world_map,
     PP_OT_expand_selection,
+    PP_OT_set_overlay_opacity,
 )
 
 

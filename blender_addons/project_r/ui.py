@@ -27,9 +27,9 @@ class PP_PT_main(Panel):
         box.prop(s, "sphere_object_name")
         row = box.row(align=True)
         row.operator("pp.load_world_map", text="Load World Map")
-        row.operator("pp.create_sphere", text="Create Sphere")
         box.prop(s, "expand_selection_rings")
         box.operator("pp.expand_selection", text="Expand Selection")
+        box.prop(s, "overlay_opacity")
 
         box = layout.box()
         box.label(text="Section Export")

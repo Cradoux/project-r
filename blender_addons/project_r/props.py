@@ -13,6 +13,8 @@ from bpy.props import (
 )
 from bpy.types import AddonPreferences, PropertyGroup
 
+from .operators import sphere_ops
+
 
 def _addon_id() -> str:
     # Package name: blender_addons.project_r
@@ -81,6 +83,21 @@ class ProjectionPastaProjectSettings(PropertyGroup):
         default=64,
         min=0,
         description="Edge feather size for blending during reassembly",
+    )
+
+    def _overlay_opacity_update(self, context: bpy.types.Context) -> None:
+        try:
+            sphere_ops.update_overlay_opacity(self.overlay_opacity)
+        except Exception:
+            pass
+
+    overlay_opacity: bpy.props.FloatProperty(  # type: ignore[valid-type]
+        name="Overlay Opacity",
+        default=0.6,
+        min=0.0,
+        max=1.0,
+        description="Opacity of extracted-region overlay on the sphere",
+        update=_overlay_opacity_update,
     )
 
     # Sphere tools
