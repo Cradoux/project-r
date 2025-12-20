@@ -479,8 +479,14 @@ def generate_effective_mask(
     # Distance from INSIDE pixels to nearest OUTSIDE pixel (boundary)
     # We need to find, for each inside pixel, how far it is from the boundary
     outside = 1 - inside  # 1 = outside, 0 = inside
+    outside_count = int(np.sum(outside))
     
-    if HAS_SCIPY and _scipy_edt is not None:
+    if outside_count == 0:
+        # No outside pixels in crop - selection fills entire crop area
+        # Fall back to very large distance (will be limited by edge distance)
+        print(f"[Project-R] No outside pixels in crop - using edge-only feathering")
+        dist_to_boundary = np.full((h, w), float(max(h, w)), dtype=np.float32)
+    elif HAS_SCIPY and _scipy_edt is not None:
         # scipy.distance_transform_edt: computes distance from 0-pixels to nearest non-zero
         # Pass `outside` (1=outside, 0=inside): inside pixels (0) get distance to nearest outside (non-zero)
         dist_to_boundary = _scipy_edt(outside).astype(np.float32)
@@ -490,7 +496,7 @@ def generate_effective_mask(
         # So pass `outside` (1=outside) to find distance to outside
         dist_to_boundary = _distance_transform_edt_fallback(outside, return_indices=False)
 
-    print(f"[Project-R] dist_to_boundary: min={np.min(dist_to_boundary):.2f}, max={np.max(dist_to_boundary):.2f}")
+    print(f"[Project-R] dist_to_boundary: min={np.min(dist_to_boundary):.2f}, max={np.max(dist_to_boundary):.2f}, outside_px={outside_count}")
 
     # Distance to image edges
     yy, xx = np.mgrid[0:h, 0:w]
