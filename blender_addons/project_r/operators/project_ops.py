@@ -11,7 +11,7 @@ from .. import manifest as manifest_lib
 class PP_OT_init_project(Operator):
     bl_idname = "pp.init_project"
     bl_label = "Init Project"
-    bl_description = "Create project folder structure and a new manifest.json if missing"
+    bl_description = "Create project folder structure and a new manifest.json if missing. If project exists, loads the world map."
 
     def execute(self, context: bpy.types.Context):
         s = context.scene.projection_pasta
@@ -23,7 +23,9 @@ class PP_OT_init_project(Operator):
         manifest_lib.init_project_folders(root)
         manifest_path = root / "manifest.json"
 
-        if not manifest_path.exists():
+        existing_project = manifest_path.exists()
+        
+        if not existing_project:
             data = manifest_lib.default_manifest(
                 global_size=(s.global_width, s.global_height),
                 hammer_full_size=(s.hammer_full_width, s.hammer_full_height),
@@ -32,8 +34,20 @@ class PP_OT_init_project(Operator):
                 blend_feather_px=s.feather_px,
             )
             manifest_lib.write_manifest(manifest_path, data)
-
-        self.report({"INFO"}, f"Project initialized at {root}")
+            self.report({"INFO"}, f"Project initialized at {root}")
+        else:
+            # Existing project: try to load world map and overlay
+            manifest = manifest_lib.read_manifest(manifest_path)
+            world_map_info = manifest.get("global", {}).get("world_map", {})
+            world_map_path = world_map_info.get("path", "")
+            
+            if world_map_path and Path(world_map_path).exists():
+                # Load world map using the existing operator
+                bpy.ops.pp.load_world_map(filepath=world_map_path)
+                self.report({"INFO"}, f"Loaded existing project at {root}")
+            else:
+                self.report({"INFO"}, f"Project initialized at {root} (no world map found)")
+        
         return {"FINISHED"}
 
 
