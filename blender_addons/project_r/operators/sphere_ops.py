@@ -17,6 +17,7 @@ def _get_edit_bmesh(context: bpy.types.Context) -> bmesh.types.BMesh | None:
         return None
     return bmesh.from_edit_mesh(obj.data)
 
+
 def _get_sphere_obj(context: bpy.types.Context) -> bpy.types.Object | None:
     s = context.scene.projection_pasta
     obj = bpy.data.objects.get(s.sphere_object_name)
@@ -26,56 +27,14 @@ def _get_sphere_obj(context: bpy.types.Context) -> bpy.types.Object | None:
 
 
 def _sphere_material_name(obj: bpy.types.Object) -> str:
-    # Make material unique per sphere object to avoid multi-user node-tree surprises.
     return f"PP_SphereMat_{obj.name}"
 
 
 def _set_single_material_slot(obj: bpy.types.Object, mat: bpy.types.Material) -> None:
-    """
-    Ensure the mesh datablock has exactly 1 material slot pointing at `mat`.
-    """
-    try:
-        # Materials live on the mesh datablock (obj.data). This is what we want for a preview sphere.
-        mats = obj.data.materials
-        mats.clear()
-        mats.append(mat)
-    except Exception:
-        # Fallback: best-effort slot cleanup
-        if obj.data.materials:
-            obj.data.materials[0] = mat
-            while len(obj.data.materials) > 1:
-                obj.data.materials.pop(index=len(obj.data.materials) - 1)
-        else:
-            obj.data.materials.append(mat)
-
-
-def _sock_by_name(sock_collection, name: str):
-    try:
-        return sock_collection.get(name)
-    except Exception:
-        return None
-
-
-def _first_shader_output(node: bpy.types.Node):
-    # Prefer named shader outputs, otherwise first SHADER socket.
-    for n in ("BSDF", "Shader", "Emission"):
-        s = _sock_by_name(node.outputs, n)
-        if s is not None:
-            return s
-    for s in node.outputs:
-        try:
-            if s.type == "SHADER":
-                return s
-        except Exception:
-            continue
-    return node.outputs[0] if len(node.outputs) else None
-
-
-def _surface_input(output_node: bpy.types.Node):
-    s = _sock_by_name(output_node.inputs, "Surface")
-    if s is not None:
-        return s
-    return output_node.inputs[0] if len(output_node.inputs) else None
+    """Ensure the mesh has exactly 1 material slot pointing at `mat`."""
+    mats = obj.data.materials
+    mats.clear()
+    mats.append(mat)
 
 
 def _ensure_sphere_material(
@@ -84,115 +43,82 @@ def _ensure_sphere_material(
     world_image: bpy.types.Image,
     overlay_path: Path | None,
 ) -> None:
+    """
+    Build (or rebuild) the sphere preview material.
+
+    Structure:
+        World Map Texture  -->  Base Color
+        Overlay Texture    -->  Emission Color
+                                Emission Strength = 10 * overlay_opacity
+        Principled BSDF    -->  Material Output (Surface)
+    """
     mat_name = _sphere_material_name(obj)
     mat = bpy.data.materials.get(mat_name) or bpy.data.materials.new(mat_name)
     mat.use_nodes = True
     nt = mat.node_tree
-    assert nt is not None
 
-    # Clear nodes except output
-    for node in list(nt.nodes):
-        if node.type != "OUTPUT_MATERIAL":
-            nt.nodes.remove(node)
+    # Clear all nodes
+    nt.nodes.clear()
 
-    out = next((n for n in nt.nodes if n.type == "OUTPUT_MATERIAL"), None)
-    if out is None:
-        out = nt.nodes.new("ShaderNodeOutputMaterial")
+    # Material Output
+    out = nt.nodes.new("ShaderNodeOutputMaterial")
+    out.location = (400, 0)
 
-    # Clear any existing links into Material Output (especially Surface) so we always
-    # end with a connected shader even if Blender/node tree state is odd.
-    try:
-        surf_in = _surface_input(out)
-        if surf_in is not None:
-            for l in list(surf_in.links):
-                nt.links.remove(l)
-    except Exception:
-        pass
+    # Principled BSDF
+    bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
+    bsdf.name = "PP_BSDF"
+    bsdf.location = (100, 0)
 
+    # World Map Texture
     tex_world = nt.nodes.new("ShaderNodeTexImage")
     tex_world.name = "PP_WorldTex"
     tex_world.label = "World Map"
     tex_world.image = world_image
+    tex_world.location = (-300, 0)
 
-    bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
-    bsdf.name = "PP_BSDF"
-    bsdf.inputs["Emission Strength"].default_value = 0.0
+    # Connect World Map -> Base Color
     nt.links.new(tex_world.outputs["Color"], bsdf.inputs["Base Color"])
 
-    final_shader = _first_shader_output(bsdf)
+    # Connect BSDF -> Material Output
+    nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
 
+    # Overlay (if exists)
+    opacity = bpy.context.scene.projection_pasta.overlay_opacity
     if overlay_path is not None and overlay_path.exists():
-        print(f"[Project-R] Wiring overlay emission from {overlay_path}")
         overlay_img = bpy.data.images.load(str(overlay_path), check_existing=True)
-        overlay_img.colorspace_settings.name = "Raw"
+        overlay_img.reload()  # Ensure we have the latest pixels
+        overlay_img.colorspace_settings.name = "sRGB"
 
         tex_overlay = nt.nodes.new("ShaderNodeTexImage")
         tex_overlay.name = "PP_OverlayTex"
         tex_overlay.label = "Extracted Overlay"
         tex_overlay.image = overlay_img
+        tex_overlay.location = (-300, -300)
 
-        # Overlay drives BOTH:
-        # - Principled emission (Emission Color + Strength)
-        # - An Emission shader node (Color + Strength) added onto the surface
-        # This matches the expectation of “plug into emission and emission color”.
+        # Connect Overlay -> Emission Color
         nt.links.new(tex_overlay.outputs["Color"], bsdf.inputs["Emission Color"])
-        mul = nt.nodes.new("ShaderNodeMath")
-        mul.name = "PP_OverlayMul"
-        mul.operation = "MULTIPLY"
-        mul.inputs[1].default_value = float(bpy.context.scene.projection_pasta.overlay_opacity)
 
-        nt.links.new(tex_overlay.outputs["Alpha"], mul.inputs[0])
-        nt.links.new(mul.outputs["Value"], bsdf.inputs["Emission Strength"])
-
-        emission = nt.nodes.new("ShaderNodeEmission")
-        emission.name = "PP_OverlayEmission"
-        nt.links.new(tex_overlay.outputs["Color"], emission.inputs["Color"])
-        nt.links.new(mul.outputs["Value"], emission.inputs["Strength"])
-
-        add = nt.nodes.new("ShaderNodeAddShader")
-        add.name = "PP_AddOverlay"
-        bsdf_out = _first_shader_output(bsdf)
-        em_out = _first_shader_output(emission)
-        if bsdf_out is not None:
-            nt.links.new(bsdf_out, add.inputs[0])
-        if em_out is not None:
-            nt.links.new(em_out, add.inputs[1])
-        final_shader = _first_shader_output(add)
-
-    # Always connect final shader to output (name/type safe across Blender versions)
-    surf_in = _surface_input(out)
-    if final_shader is not None and surf_in is not None:
-        try:
-            nt.links.new(final_shader, surf_in)
-        except Exception as e:
-            print("[Project-R] Failed to link shader to Material Output:", e)
-
-    # Final safety: if still not linked, try direct BSDF -> Surface
-    try:
-        surf_in = _surface_input(out)
-        if surf_in is not None and not surf_in.is_linked:
-            bsdf_out = _first_shader_output(bsdf)
-            if bsdf_out is not None:
-                nt.links.new(bsdf_out, surf_in)
-    except Exception:
-        pass
+        # Set Emission Strength = 10 * opacity
+        bsdf.inputs["Emission Strength"].default_value = 10.0 * opacity
+    else:
+        # No overlay: emission off
+        bsdf.inputs["Emission Strength"].default_value = 0.0
 
     _set_single_material_slot(obj, mat)
 
 
 def update_overlay_opacity(opacity: float) -> None:
+    """Update Emission Strength on the sphere's Principled BSDF."""
     obj = _get_sphere_obj(bpy.context)
-    if obj is None:
-        return
-    if not obj.data.materials:
+    if obj is None or not obj.data.materials:
         return
     mat = obj.data.materials[0]
     if mat is None or not mat.use_nodes or mat.node_tree is None:
         return
-    mul = mat.node_tree.nodes.get("PP_OverlayMul")
-    if mul is None or mul.type != "MATH":
+    bsdf = mat.node_tree.nodes.get("PP_BSDF")
+    if bsdf is None:
         return
-    mul.inputs[1].default_value = float(opacity)
+    bsdf.inputs["Emission Strength"].default_value = 10.0 * opacity
 
 
 def ensure_overlay_connected(context: bpy.types.Context) -> None:
@@ -240,6 +166,7 @@ def ensure_overlay_connected_with_paths(
     if obj is None:
         return
 
+    # Try to get world image from existing material
     world_img = None
     if obj.data.materials:
         mat = obj.data.materials[0]
@@ -248,6 +175,7 @@ def ensure_overlay_connected_with_paths(
             if node and getattr(node, "image", None) is not None:
                 world_img = node.image
 
+    # Fallback: load from manifest
     if world_img is None:
         root = s.project_root_path()
         mp = s.manifest_path()
@@ -271,11 +199,10 @@ class PP_OT_create_sphere(Operator):
     def execute(self, context: bpy.types.Context):
         s = context.scene.projection_pasta
 
-        # `mode_set` requires an active object; if the scene is empty (or nothing is
-        # active), this operator will fail. Only switch modes when it's valid.
         if context.mode != "OBJECT":
             if context.active_object is not None and bpy.ops.object.mode_set.poll():
                 bpy.ops.object.mode_set(mode="OBJECT")
+
         bpy.ops.mesh.primitive_uv_sphere_add(
             segments=64,
             ring_count=32,
@@ -287,12 +214,8 @@ class PP_OT_create_sphere(Operator):
             return {"CANCELLED"}
         obj.name = s.sphere_object_name
 
-        # Ensure a UV map exists
         if obj.data.uv_layers.active is None:
             obj.data.uv_layers.new(name="UVMap")
-
-        # Ensure a unique material name will be used for this sphere in future wiring
-        # (we don't create it here; it gets created when a world map is loaded).
 
         self.report({"INFO"}, f"Created sphere: {obj.name}")
         return {"FINISHED"}
@@ -356,7 +279,6 @@ class PP_OT_load_world_map(Operator):
             self.report({"ERROR"}, "No world map selected")
             return {"CANCELLED"}
 
-        # Load image to infer size
         img = bpy.data.images.load(self.filepath, check_existing=True)
         w, h = img.size
         if h == 0:
@@ -368,7 +290,6 @@ class PP_OT_load_world_map(Operator):
         if abs(ratio - 2.0) > tol:
             self.report({"WARNING"}, f"World map aspect ratio is {ratio:.3f} (expected ~2.0)")
 
-        # Ensure sphere exists and assign the image as preview
         if bpy.data.objects.get(s.sphere_object_name) is None:
             bpy.ops.pp.create_sphere()
 
@@ -377,7 +298,6 @@ class PP_OT_load_world_map(Operator):
             self.report({"ERROR"}, "Sphere creation failed")
             return {"CANCELLED"}
 
-        # Update manifest global size and store world_map path; also add as a layer if missing
         manifest = manifest_lib.read_manifest(mp)
         manifest.setdefault("global", {}).setdefault("projection", "Equirectangular")
         manifest["global"]["size"] = [int(w), int(h)]
@@ -391,7 +311,6 @@ class PP_OT_load_world_map(Operator):
         layers = manifest["global"].setdefault("layers", [])
         already = any(l.get("id") == "color_map" for l in layers)
         if not already:
-            # Best-effort format inference
             ext = Path(self.filepath).suffix.lower()
             fmt = "PNG" if ext == ".png" else ("JPEG" if ext in (".jpg", ".jpeg") else "PNG")
             layers.append(
@@ -406,12 +325,9 @@ class PP_OT_load_world_map(Operator):
         manifest_lib.write_manifest(mp, manifest)
 
         overlay_path = None
-        try:
-            overlay = manifest.get("global", {}).get("overlay")
-            if overlay and overlay.get("path"):
-                overlay_path = (root / overlay["path"]).resolve()
-        except Exception:
-            overlay_path = None
+        overlay = manifest.get("global", {}).get("overlay")
+        if overlay and overlay.get("path"):
+            overlay_path = (root / overlay["path"]).resolve()
 
         _ensure_sphere_material(obj=obj, world_image=img, overlay_path=overlay_path)
 
@@ -469,5 +385,3 @@ def register() -> None:
 def unregister() -> None:
     for c in reversed(_CLASSES):
         bpy.utils.unregister_class(c)
-
-
