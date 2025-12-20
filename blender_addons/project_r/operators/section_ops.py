@@ -19,6 +19,152 @@ from ..vendor.projectionpasta import projectionpasta as pp
 from . import sphere_ops
 
 
+def _point_in_triangle_2d(
+    px: np.ndarray,
+    py: np.ndarray,
+    ax: float, ay: float,
+    bx: float, by: float,
+    cx: float, cy: float,
+) -> np.ndarray:
+    """
+    Vectorized check if points (px, py) are inside triangle ABC.
+    Returns boolean mask.
+    """
+    def sign(p1x, p1y, p2x, p2y, p3x, p3y):
+        return (p1x - p3x) * (p2y - p3y) - (p2x - p3x) * (p1y - p3y)
+
+    d1 = sign(px, py, ax, ay, bx, by)
+    d2 = sign(px, py, bx, by, cx, cy)
+    d3 = sign(px, py, cx, cy, ax, ay)
+
+    has_neg = (d1 < 0) | (d2 < 0) | (d3 < 0)
+    has_pos = (d1 > 0) | (d2 > 0) | (d3 > 0)
+
+    return ~(has_neg & has_pos)
+
+
+def _rasterize_coverage_mask(
+    *,
+    triangles_uv: List[Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]],
+    center: geo.LonLat,
+    rot_rad: float,
+    full_size: Tuple[int, int],
+    crop_rect: geo.RectI,
+    half_res: bool = True,
+) -> np.ndarray:
+    """
+    Rasterize selected face triangles into a coverage mask in Hammer crop space.
+    
+    For each pixel in the crop:
+    1. Compute its Hammer x,y coordinates
+    2. Inverse-project to lon/lat
+    3. Convert to equirect UV
+    4. Check if inside any selected triangle
+    
+    Returns: (H, W) float32 array with 1.0 where selected, 0.0 elsewhere.
+    """
+    full_w, full_h = full_size
+    cx, cy, cw, ch = crop_rect.x, crop_rect.y, crop_rect.w, crop_rect.h
+
+    # Output size (half res if requested)
+    if half_res:
+        out_w, out_h = cw // 2, ch // 2
+    else:
+        out_w, out_h = cw, ch
+
+    if out_w <= 0 or out_h <= 0:
+        return np.zeros((max(1, out_h), max(1, out_w)), dtype=np.float32)
+
+    # Create pixel grid for the crop
+    # Map crop pixel coords to full canvas coords, then to Hammer projection coords
+    crop_x = np.linspace(0.5, out_w - 0.5, out_w, dtype=np.float64)
+    crop_y = np.linspace(0.5, out_h - 0.5, out_h, dtype=np.float64)
+    crop_xx, crop_yy = np.meshgrid(crop_x, crop_y)
+
+    # Scale crop coords to full canvas coords
+    if half_res:
+        full_xx = cx + crop_xx * 2.0
+        full_yy = cy + crop_yy * 2.0
+    else:
+        full_xx = cx + crop_xx
+        full_yy = cy + crop_yy
+
+    # Convert full canvas pixel coords to Hammer projection space [-1, 1]
+    hammer_x = (full_xx + 0.5) / full_w * 2.0 - 1.0
+    hammer_y = 1.0 - (full_yy + 0.5) / full_h * 2.0
+
+    # Inverse Hammer projection: get lon/lat from hammer_x, hammer_y
+    # Using projectionpasta's inverse projection
+    opts = dict(pp.def_opts)
+    opts["in"] = True  # inverse direction
+
+    aspect = np.array([center.lon, center.lat, rot_rad], dtype=np.float64)
+
+    # projectionpasta Hammer inverse: x,y -> lon,lat
+    lon_r, lat_r = pp.posl["Hammer"](hammer_x.ravel(), hammer_y.ravel(), opts)
+
+    # Rotate back from centered coords
+    lon, lat = pp.Rotate_from(lon_r, lat_r, aspect)
+
+    lon = lon.reshape(out_h, out_w)
+    lat = lat.reshape(out_h, out_w)
+
+    # Check which pixels are outside valid Hammer projection (NaN or outside range)
+    valid_proj = np.isfinite(lon) & np.isfinite(lat)
+
+    # Convert lon/lat to UV
+    # lon in radians: -pi..pi -> U 0..1
+    # lat in radians: -pi/2..pi/2 -> V 0..1
+    u = (lon / (2 * np.pi) + 0.5) % 1.0
+    v = (lat / np.pi + 0.5)
+
+    # Now check if each UV point falls inside any selected triangle
+    mask = np.zeros((out_h, out_w), dtype=np.float32)
+
+    for tri in triangles_uv:
+        (u0, v0), (u1, v1), (u2, v2) = tri
+
+        # Handle seam-crossing triangles
+        us = [u0, u1, u2]
+        span = max(us) - min(us)
+
+        if span > 0.5:
+            # Triangle crosses U seam; test both shifted versions
+            # Variant A: shift low U values up
+            tri_a = [(uu + 1.0 if uu < 0.5 else uu, vv) for (uu, vv) in tri]
+            # Variant B: shift high U values down
+            tri_b = [(uu - 1.0 if uu > 0.5 else uu, vv) for (uu, vv) in tri]
+
+            # Test shifted UVs
+            u_shifted_a = np.where(u < 0.5, u + 1.0, u)
+            u_shifted_b = np.where(u > 0.5, u - 1.0, u)
+
+            inside_a = _point_in_triangle_2d(
+                u_shifted_a, v,
+                tri_a[0][0], tri_a[0][1],
+                tri_a[1][0], tri_a[1][1],
+                tri_a[2][0], tri_a[2][1],
+            )
+            inside_b = _point_in_triangle_2d(
+                u_shifted_b, v,
+                tri_b[0][0], tri_b[0][1],
+                tri_b[1][0], tri_b[1][1],
+                tri_b[2][0], tri_b[2][1],
+            )
+            inside = inside_a | inside_b
+        else:
+            inside = _point_in_triangle_2d(
+                u, v,
+                u0, v0,
+                u1, v1,
+                u2, v2,
+            )
+
+        mask = np.where(inside & valid_proj, 1.0, mask)
+
+    return mask.astype(np.float32)
+
+
 def _selected_uv_lonlats(context: bpy.types.Context) -> List[geo.LonLat]:
     obj = context.active_object
     if obj is None or obj.type != "MESH":
@@ -348,7 +494,51 @@ class PP_OT_create_section(bpy.types.Operator):
             full_paths[layer_id] = str(full_rel).replace("\\", "/")
             crop_paths[layer_id] = str(crop_rel).replace("\\", "/")
 
-        # Weight mask (always PNG)
+        # ---- Generate Coverage Mask (half-res) ----
+        # Gather UV triangles from selected faces
+        try:
+            obj = context.active_object
+            bm = bmesh.from_edit_mesh(obj.data)
+            uv_layer = bm.loops.layers.uv.active
+            seed_faces = {f for f in bm.faces if f.select}
+            triangles_uv = _gather_uv_triangles_for_faces(bm, seed_faces, uv_layer)
+        except Exception:
+            triangles_uv = []
+
+        coverage_mask = _rasterize_coverage_mask(
+            triangles_uv=triangles_uv,
+            center=center,
+            rot_rad=0.0,
+            full_size=(full_w, full_h),
+            crop_rect=rect,
+            half_res=True,
+        )
+        coverage_rel = Path("sections") / sec_id / "coverage_mask__crop.png"
+        coverage_path = root / coverage_rel
+        coverage_buf = imaging.ImageBuffer(
+            width=coverage_mask.shape[1],
+            height=coverage_mask.shape[0],
+            channels=1,
+            pixels=coverage_mask[..., None],
+        )
+        imaging.save_image(coverage_buf, coverage_path, "PNG", color_depth="8")
+
+        # ---- Generate Feather Mask (half-res, from coverage) ----
+        feather_mask = imaging.generate_feather_mask_from_coverage(
+            coverage_mask,
+            feather_px=int(s.feather_px) // 2,  # Scale feather for half-res
+        )
+        feather_rel = Path("sections") / sec_id / "feather_mask__crop.png"
+        feather_path = root / feather_rel
+        feather_buf = imaging.ImageBuffer(
+            width=feather_mask.shape[1],
+            height=feather_mask.shape[0],
+            channels=1,
+            pixels=feather_mask[..., None],
+        )
+        imaging.save_image(feather_buf, feather_path, "PNG", color_depth="16")
+
+        # Legacy weight mask (edge-based, for backward compat)
         weight = imaging.make_feather_weight_mask(rect.w, rect.h, int(s.feather_px))
         weight_rel = Path("sections") / sec_id / "weightmask__crop.png"
         imaging.save_image(weight, root / weight_rel, "PNG", color_depth="16")
@@ -375,6 +565,11 @@ class PP_OT_create_section(bpy.types.Operator):
                     "paths_by_layer": crop_paths,
                 },
                 "processed": {"expected_paths_by_layer": {}},
+                "masks": {
+                    "coverage_path": str(coverage_rel).replace("\\", "/"),
+                    "feather_path": str(feather_rel).replace("\\", "/"),
+                    "resolution_scale": 0.5,
+                },
                 "reassembly": {
                     "feather_px": int(s.feather_px),
                     "weight_mask_path": str(weight_rel).replace("\\", "/"),

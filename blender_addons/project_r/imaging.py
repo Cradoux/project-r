@@ -7,6 +7,14 @@ from typing import Literal, Tuple
 import bpy
 import numpy as np
 
+# SciPy is optional; we provide a fallback for distance transforms.
+try:
+    from scipy.ndimage import distance_transform_edt as _scipy_edt
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+    _scipy_edt = None  # type: ignore
+
 ImageFormat = Literal["OPEN_EXR", "PNG", "JPEG"]
 
 
@@ -357,5 +365,205 @@ def paint_uv_circles_on_overlay(
 
     out = np.asarray(base, dtype=np.uint8)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Distance Transform & Nearest-Valid Extension
+# ---------------------------------------------------------------------------
+
+def _distance_transform_edt_fallback(mask: np.ndarray, return_indices: bool = False):
+    """
+    Pure-numpy fallback for distance_transform_edt.
+    Uses a simple brute-force O(n^2) approach - slow but works without scipy.
+    For large images, scipy is strongly recommended.
+    """
+    h, w = mask.shape[:2]
+    dist = np.full((h, w), np.inf, dtype=np.float32)
+    indices = np.zeros((2, h, w), dtype=np.int64) if return_indices else None
+
+    # Find all valid (mask == 1) pixel coordinates
+    valid_ys, valid_xs = np.where(mask > 0.5)
+    if len(valid_ys) == 0:
+        # No valid pixels; return zeros
+        if return_indices:
+            return np.zeros((h, w), dtype=np.float32), np.zeros((2, h, w), dtype=np.int64)
+        return np.zeros((h, w), dtype=np.float32)
+
+    # For each pixel, find distance to nearest valid pixel
+    # This is O(n*m) where n=total pixels, m=valid pixels
+    yy, xx = np.mgrid[0:h, 0:w]
+
+    # Process in chunks to limit memory for large images
+    chunk_size = 1000
+    for i in range(0, len(valid_ys), chunk_size):
+        vy = valid_ys[i : i + chunk_size, None, None]
+        vx = valid_xs[i : i + chunk_size, None, None]
+        d2 = (yy[None, :, :] - vy) ** 2 + (xx[None, :, :] - vx) ** 2
+        min_idx = np.argmin(d2, axis=0)
+        min_d2 = np.take_along_axis(d2, min_idx[None, :, :], axis=0)[0]
+        update = min_d2 < dist**2
+        dist = np.where(update, np.sqrt(min_d2), dist)
+        if return_indices:
+            indices[0] = np.where(update, valid_ys[i + min_idx], indices[0])
+            indices[1] = np.where(update, valid_xs[i + min_idx], indices[1])
+
+    if return_indices:
+        return dist.astype(np.float32), indices
+    return dist.astype(np.float32)
+
+
+def distance_transform_edt(mask: np.ndarray, return_indices: bool = False):
+    """
+    Compute Euclidean distance transform. Uses scipy if available, else fallback.
+    
+    Args:
+        mask: Binary mask (H, W), nonzero = valid pixels
+        return_indices: If True, also return indices of nearest valid pixel
+    
+    Returns:
+        dist: Distance to nearest valid pixel (0 for valid pixels themselves)
+        indices: (optional) (2, H, W) array of [y, x] indices of nearest valid pixel
+    """
+    mask_2d = mask.squeeze() if mask.ndim > 2 else mask
+    # Invert: we want distance to nearest valid (1) pixel, not background
+    # scipy measures from 0s to 1s, so we pass the inverted mask
+    bg_mask = (mask_2d < 0.5).astype(np.uint8)
+
+    if HAS_SCIPY and _scipy_edt is not None:
+        if return_indices:
+            dist, indices = _scipy_edt(bg_mask, return_indices=True)
+            return dist.astype(np.float32), indices
+        else:
+            dist = _scipy_edt(bg_mask)
+            return dist.astype(np.float32)
+    else:
+        # Fallback: compute distance from each invalid pixel to nearest valid
+        # We invert the logic: pass the valid mask
+        valid_mask = (mask_2d >= 0.5).astype(np.uint8)
+        return _distance_transform_edt_fallback(valid_mask, return_indices=return_indices)
+
+
+def generate_feather_mask_from_coverage(
+    coverage: np.ndarray,
+    feather_px: int,
+) -> np.ndarray:
+    """
+    Generate a feather (blend weight) mask from a binary coverage mask.
+    
+    Feather weight combines:
+    - Distance to nearest unselected pixel (selection boundary)
+    - Distance to image edge
+    
+    Result: 0..1 float array same size as coverage.
+    """
+    feather_px = max(1, int(feather_px))
+    h, w = coverage.shape[:2]
+    cov_2d = coverage.squeeze() if coverage.ndim > 2 else coverage
+
+    # Distance from selection boundary (inward)
+    # For valid pixels, measure distance to nearest invalid pixel
+    dist_to_boundary = distance_transform_edt((cov_2d >= 0.5).astype(np.uint8))
+
+    # Distance to image edges
+    yy, xx = np.mgrid[0:h, 0:w]
+    dist_to_edge = np.minimum(
+        np.minimum(xx, (w - 1) - xx),
+        np.minimum(yy, (h - 1) - yy),
+    ).astype(np.float32)
+
+    # Combine: take minimum of both distances, normalize by feather width
+    combined = np.minimum(dist_to_boundary, dist_to_edge)
+    feather = np.clip(combined / float(feather_px), 0.0, 1.0)
+
+    # Zero out outside coverage
+    feather = feather * (cov_2d >= 0.5).astype(np.float32)
+
+    return feather.astype(np.float32)
+
+
+def extend_nearest_valid(
+    image: np.ndarray,
+    coverage: np.ndarray,
+) -> np.ndarray:
+    """
+    Fill invalid regions (coverage==0) by sampling from nearest valid pixel.
+    
+    This prevents black/undefined pixels from contaminating blends.
+    
+    Args:
+        image: (H, W, C) image array
+        coverage: (H, W) or (H, W, 1) binary mask, 1=valid, 0=invalid
+    
+    Returns:
+        Filled image with same shape as input
+    """
+    cov_2d = coverage.squeeze() if coverage.ndim > 2 else coverage
+    valid_mask = (cov_2d >= 0.5).astype(np.uint8)
+
+    # If all valid, nothing to do
+    if np.all(valid_mask):
+        return image.copy()
+
+    # If none valid, return as-is (can't extend from nothing)
+    if not np.any(valid_mask):
+        return image.copy()
+
+    # Get indices of nearest valid pixel for each position
+    _, indices = distance_transform_edt(valid_mask, return_indices=True)
+
+    # Sample from those indices
+    out = image[indices[0], indices[1]]
+    return out.astype(image.dtype)
+
+
+def resize_half(arr: np.ndarray) -> np.ndarray:
+    """Downsample array by 2x using simple averaging."""
+    h, w = arr.shape[:2]
+    h2, w2 = h // 2, w // 2
+    if arr.ndim == 2:
+        return arr[:h2 * 2, :w2 * 2].reshape(h2, 2, w2, 2).mean(axis=(1, 3)).astype(arr.dtype)
+    else:
+        return arr[:h2 * 2, :w2 * 2].reshape(h2, 2, w2, 2, -1).mean(axis=(1, 3)).astype(arr.dtype)
+
+
+def resize_double_bilinear(arr: np.ndarray) -> np.ndarray:
+    """Upsample array by 2x using bilinear interpolation."""
+    try:
+        from PIL import Image as PILImage
+    except ImportError:
+        # Fallback: simple duplication
+        if arr.ndim == 2:
+            return np.repeat(np.repeat(arr, 2, axis=0), 2, axis=1)
+        else:
+            return np.repeat(np.repeat(arr, 2, axis=0), 2, axis=1)
+
+    h, w = arr.shape[:2]
+    if arr.ndim == 2 or arr.shape[2] == 1:
+        squeezed = arr.squeeze()
+        # Scale to uint16 for precision
+        if squeezed.dtype == np.float32 or squeezed.dtype == np.float64:
+            scaled = (np.clip(squeezed, 0, 1) * 65535).astype(np.uint16)
+            im = PILImage.fromarray(scaled, mode="I;16")
+            im_up = im.resize((w * 2, h * 2), resample=PILImage.BILINEAR)
+            return (np.asarray(im_up).astype(np.float32) / 65535.0)[..., None]
+        else:
+            im = PILImage.fromarray(squeezed)
+            im_up = im.resize((w * 2, h * 2), resample=PILImage.BILINEAR)
+            return np.asarray(im_up)[..., None]
+    else:
+        # Multi-channel: resize each channel
+        channels = []
+        for c in range(arr.shape[2]):
+            ch = arr[:, :, c]
+            if ch.dtype == np.float32 or ch.dtype == np.float64:
+                scaled = (np.clip(ch, 0, 1) * 65535).astype(np.uint16)
+                im = PILImage.fromarray(scaled, mode="I;16")
+                im_up = im.resize((w * 2, h * 2), resample=PILImage.BILINEAR)
+                channels.append(np.asarray(im_up).astype(np.float32) / 65535.0)
+            else:
+                im = PILImage.fromarray(ch)
+                im_up = im.resize((w * 2, h * 2), resample=PILImage.BILINEAR)
+                channels.append(np.asarray(im_up))
+        return np.stack(channels, axis=-1)
 
 
