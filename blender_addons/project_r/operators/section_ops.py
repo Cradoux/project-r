@@ -272,8 +272,9 @@ class PP_OT_create_section(bpy.types.Operator):
             except Exception:
                 pass
 
-        full_w = int(s.hammer_full_width)
-        full_h = int(s.hammer_full_height)
+        # Use the world map size for Hammer full dimensions
+        full_w = int(global_size[0])
+        full_h = int(global_size[1])
         rect = _compute_crop_rect(
             lonlats=lonlats,
             center=center,
@@ -364,7 +365,7 @@ class PP_OT_create_section(bpy.types.Operator):
                     "rot_deg": params.rot_deg,
                 },
                 "full_canvas": {
-                    "size": [int(s.hammer_full_width), int(s.hammer_full_height)],
+                    "size": [full_w, full_h],
                     "path_by_layer": full_paths,
                 },
                 "crop": {

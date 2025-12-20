@@ -341,18 +341,17 @@ class PP_OT_expand_selection(Operator):
     bl_description = "Expand the current face selection by N rings (Edit Mode only)"
 
     def execute(self, context: bpy.types.Context):
-        s = context.scene.projection_pasta
         bm = _get_edit_bmesh(context)
         if bm is None:
             self.report({"ERROR"}, "Must be in Edit Mode with a mesh active")
             return {"CANCELLED"}
 
-        for _ in range(int(s.expand_selection_rings)):
-            boundary = [f for f in bm.faces if f.select]
-            for f in boundary:
-                for e in f.edges:
-                    for f2 in e.link_faces:
-                        f2.select = True
+        # Expand by 1 ring (hardcoded)
+        boundary = [f for f in bm.faces if f.select]
+        for f in boundary:
+            for e in f.edges:
+                for f2 in e.link_faces:
+                    f2.select = True
 
         bmesh.update_edit_mesh(context.active_object.data)
         return {"FINISHED"}

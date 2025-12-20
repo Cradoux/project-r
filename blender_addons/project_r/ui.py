@@ -24,18 +24,14 @@ class PP_PT_main(Panel):
 
         box = layout.box()
         box.label(text="Sphere")
-        box.prop(s, "sphere_object_name")
         row = box.row(align=True)
         row.operator("pp.load_world_map", text="Load World Map")
-        box.prop(s, "expand_selection_rings")
         box.operator("pp.expand_selection", text="Expand Selection")
         box.prop(s, "overlay_opacity")
 
         box = layout.box()
         box.label(text="Section Export")
         box.prop(s, "new_section_name")
-        box.prop(s, "hammer_full_width")
-        box.prop(s, "hammer_full_height")
         box.prop(s, "crop_margin_px")
         box.prop(s, "square_crop")
         box.prop(s, "feather_px")
