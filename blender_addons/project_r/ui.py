@@ -3,6 +3,8 @@ from __future__ import annotations
 import bpy
 from bpy.types import Panel
 
+from . import is_scipy_available
+
 
 class PP_PT_main(Panel):
     bl_label = "Project-R"
@@ -14,6 +16,14 @@ class PP_PT_main(Panel):
     def draw(self, context: bpy.types.Context) -> None:
         s = context.scene.projection_pasta
         layout = self.layout
+
+        # Dependencies check
+        if not is_scipy_available():
+            box = layout.box()
+            box.alert = True
+            box.label(text="scipy not installed!", icon="ERROR")
+            box.operator("pp.install_dependencies", text="Install scipy")
+            box.label(text="(Restart Blender after install)")
 
         box = layout.box()
         box.label(text="Project")

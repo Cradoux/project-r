@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import importlib
+import subprocess
+import sys
 
 import bpy
+from bpy.types import Operator
 
 bl_info = {
     "name": "Project-R",
@@ -13,6 +16,40 @@ bl_info = {
     "description": "Export Hammer (oblique) section crops from equirectangular maps and reassemble them back (powered by projectionpasta).",
     "category": "Import-Export",
 }
+
+
+def is_scipy_available() -> bool:
+    try:
+        import scipy.ndimage
+        return True
+    except ImportError:
+        return False
+
+
+class PP_OT_install_dependencies(Operator):
+    bl_idname = "pp.install_dependencies"
+    bl_label = "Install Dependencies (scipy)"
+    bl_description = "Install scipy using Blender's Python pip"
+
+    def execute(self, context):
+        python = sys.executable
+        try:
+            # Ensure pip is available
+            subprocess.check_call([python, "-m", "ensurepip", "--upgrade"])
+        except Exception:
+            pass  # pip may already be available
+
+        try:
+            subprocess.check_call([python, "-m", "pip", "install", "--upgrade", "scipy"])
+            self.report({"INFO"}, "scipy installed successfully! Please restart Blender.")
+            return {"FINISHED"}
+        except subprocess.CalledProcessError as e:
+            self.report({"ERROR"}, f"Failed to install scipy: {e}")
+            return {"CANCELLED"}
+        except Exception as e:
+            self.report({"ERROR"}, f"Unexpected error: {e}")
+            return {"CANCELLED"}
+
 
 from . import props as _props
 from . import ui as _ui
@@ -42,6 +79,8 @@ def _reload_modules_for_dev() -> None:
 def register() -> None:
     _reload_modules_for_dev()
 
+    bpy.utils.register_class(PP_OT_install_dependencies)
+
     for m in _MODULES:
         if hasattr(m, "register"):
             m.register()
@@ -58,5 +97,7 @@ def unregister() -> None:
     for m in reversed(_MODULES):
         if hasattr(m, "unregister"):
             m.unregister()
+
+    bpy.utils.unregister_class(PP_OT_install_dependencies)
 
 
