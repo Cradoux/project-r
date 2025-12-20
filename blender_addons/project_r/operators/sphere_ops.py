@@ -17,6 +17,37 @@ def _get_edit_bmesh(context: bpy.types.Context) -> bmesh.types.BMesh | None:
         return None
     return bmesh.from_edit_mesh(obj.data)
 
+def _get_sphere_obj(context: bpy.types.Context) -> bpy.types.Object | None:
+    s = context.scene.projection_pasta
+    obj = bpy.data.objects.get(s.sphere_object_name)
+    if obj is None or obj.type != "MESH":
+        return None
+    return obj
+
+
+def _sphere_material_name(obj: bpy.types.Object) -> str:
+    # Make material unique per sphere object to avoid multi-user node-tree surprises.
+    return f"PP_SphereMat_{obj.name}"
+
+
+def _set_single_material_slot(obj: bpy.types.Object, mat: bpy.types.Material) -> None:
+    """
+    Ensure the mesh datablock has exactly 1 material slot pointing at `mat`.
+    """
+    try:
+        # Materials live on the mesh datablock (obj.data). This is what we want for a preview sphere.
+        mats = obj.data.materials
+        mats.clear()
+        mats.append(mat)
+    except Exception:
+        # Fallback: best-effort slot cleanup
+        if obj.data.materials:
+            obj.data.materials[0] = mat
+            while len(obj.data.materials) > 1:
+                obj.data.materials.pop(index=len(obj.data.materials) - 1)
+        else:
+            obj.data.materials.append(mat)
+
 
 def _sock_by_name(sock_collection, name: str):
     try:
@@ -53,7 +84,8 @@ def _ensure_sphere_material(
     world_image: bpy.types.Image,
     overlay_path: Path | None,
 ) -> None:
-    mat = bpy.data.materials.get("PP_SphereMat") or bpy.data.materials.new("PP_SphereMat")
+    mat_name = _sphere_material_name(obj)
+    mat = bpy.data.materials.get(mat_name) or bpy.data.materials.new(mat_name)
     mat.use_nodes = True
     nt = mat.node_tree
     assert nt is not None
@@ -145,18 +177,19 @@ def _ensure_sphere_material(
     except Exception:
         pass
 
-    if obj.data.materials:
-        obj.data.materials[0] = mat
-    else:
-        obj.data.materials.append(mat)
+    _set_single_material_slot(obj, mat)
 
 
 def update_overlay_opacity(opacity: float) -> None:
-    mat = bpy.data.materials.get("PP_SphereMat")
+    obj = _get_sphere_obj(bpy.context)
+    if obj is None:
+        return
+    if not obj.data.materials:
+        return
+    mat = obj.data.materials[0]
     if mat is None or not mat.use_nodes or mat.node_tree is None:
         return
-    nt = mat.node_tree
-    mul = nt.nodes.get("PP_OverlayMul")
+    mul = mat.node_tree.nodes.get("PP_OverlayMul")
     if mul is None or mul.type != "MATH":
         return
     mul.inputs[1].default_value = float(opacity)
@@ -173,8 +206,8 @@ def ensure_overlay_connected(context: bpy.types.Context) -> None:
     if root is None or mp is None or not mp.exists():
         return
 
-    obj = bpy.data.objects.get(s.sphere_object_name)
-    if obj is None or obj.type != "MESH":
+    obj = _get_sphere_obj(context)
+    if obj is None:
         return
 
     manifest = manifest_lib.read_manifest(mp)
@@ -203,16 +236,17 @@ def ensure_overlay_connected_with_paths(
     so we don't depend on manifest.json being updated yet.
     """
     s = context.scene.projection_pasta
-    obj = bpy.data.objects.get(s.sphere_object_name)
-    if obj is None or obj.type != "MESH":
+    obj = _get_sphere_obj(context)
+    if obj is None:
         return
 
     world_img = None
-    mat = bpy.data.materials.get("PP_SphereMat")
-    if mat and mat.use_nodes and mat.node_tree:
-        node = mat.node_tree.nodes.get("PP_WorldTex")
-        if node and getattr(node, "image", None) is not None:
-            world_img = node.image
+    if obj.data.materials:
+        mat = obj.data.materials[0]
+        if mat and mat.use_nodes and mat.node_tree:
+            node = mat.node_tree.nodes.get("PP_WorldTex")
+            if node and getattr(node, "image", None) is not None:
+                world_img = node.image
 
     if world_img is None:
         root = s.project_root_path()
@@ -256,6 +290,9 @@ class PP_OT_create_sphere(Operator):
         # Ensure a UV map exists
         if obj.data.uv_layers.active is None:
             obj.data.uv_layers.new(name="UVMap")
+
+        # Ensure a unique material name will be used for this sphere in future wiring
+        # (we don't create it here; it gets created when a world map is loaded).
 
         self.report({"INFO"}, f"Created sphere: {obj.name}")
         return {"FINISHED"}
