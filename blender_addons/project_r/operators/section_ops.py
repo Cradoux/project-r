@@ -443,46 +443,51 @@ class PP_OT_create_section(bpy.types.Operator):
             square=bool(s.square_crop),
         )
 
-        # Export all configured global layers to Hammer full + crop.
-        layers = manifest.get("global", {}).get("layers", []) or []
+        # Scan source/ folder for all image files to process
+        source_dir = root / "source"
+        IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".exr", ".tif", ".tiff"}
+        source_maps: List[Path] = []
+        if source_dir.exists():
+            for f in source_dir.iterdir():
+                if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS:
+                    source_maps.append(f)
+        
         full_paths: dict[str, str] = {}
         crop_paths: dict[str, str] = {}
 
-        def _interp_for_layer(layer_id: str, filename: str) -> str:
-            name = (layer_id + " " + filename).lower()
+        def _interp_for_layer(filename: str) -> str:
+            name = filename.lower()
             if any(k in name for k in ("mask", "land", "plates", "labels")):
                 return "nearest"
-            if any(k in name for k in ("height", "elev", "dem")):
-                return "linear"
             return "linear"
 
-        def _treat_as_color(layer_id: str, filename: str) -> bool:
-            name = (layer_id + " " + filename).lower()
+        def _treat_as_color(filename: str, ext: str) -> bool:
+            name = filename.lower()
             if any(k in name for k in ("mask", "land", "plates", "labels")):
                 return False
             if any(k in name for k in ("height", "elev", "dem")):
                 return False
             # Treat typical PNG/JPG albedo-like maps as sRGB.
-            return True
+            return ext in (".png", ".jpg", ".jpeg")
 
-        for layer in layers:
-            layer_id = str(layer.get("id", "layer")).strip() or "layer"
-            src = str(layer.get("path", "")).strip()
-            if not src:
-                continue
-
-            src_path = Path(src)
-            if not src_path.is_absolute():
-                src_path = (root / src_path).resolve()
-
-            ext = src_path.suffix.lower() or ".png"
-            full_rel = Path("sections") / sec_id / f"{layer_id}__hammer_full{ext}"
-            crop_rel = Path("sections") / sec_id / f"{layer_id}__crop{ext}"
+        print(f"[Project-R] Processing {len(source_maps)} source map(s)...")
+        
+        for src_path in source_maps:
+            filename = src_path.name
+            layer_id = src_path.stem  # filename without extension
+            ext = src_path.suffix.lower()
+            
+            full_rel = Path("sections") / sec_id / f"{filename.replace(ext, '')}__hammer_full{ext}"
+            crop_rel = Path("sections") / sec_id / "crops" / filename
             full_path = (root / full_rel).resolve()
             crop_path = (root / crop_rel).resolve()
+            crop_path.parent.mkdir(parents=True, exist_ok=True)
 
-            interp = _interp_for_layer(layer_id, src_path.name)
-            treat_as_color = _treat_as_color(layer_id, src_path.name) and ext in (".png", ".jpg", ".jpeg")
+            interp = _interp_for_layer(filename)
+            treat_as_color = _treat_as_color(filename, ext)
+            
+            print(f"[Project-R]   - {filename} (interp={interp}, color={treat_as_color})")
+            
             project_equirect_to_hammer(
                 src_path=src_path,
                 dst_path=full_path,
@@ -505,7 +510,7 @@ class PP_OT_create_section(bpy.types.Operator):
             imaging.save_image(crop_img, crop_path, fmt, color_depth=depth)
 
             full_paths[layer_id] = str(full_rel).replace("\\", "/")
-            crop_paths[layer_id] = str(crop_rel).replace("\\", "/")
+            crop_paths[filename] = str(crop_rel).replace("\\", "/")
 
         # ---- Generate Effective Mask ----
         # New approach: create mask in equirect space, reproject to Hammer, then crop
@@ -552,6 +557,9 @@ class PP_OT_create_section(bpy.types.Operator):
         )
         imaging.save_image(effective_buf, effective_path, "PNG", color_depth="16")
 
+        # Update source_maps in manifest
+        manifest.setdefault("global", {})["source_maps"] = [f.name for f in source_maps]
+        
         manifest.setdefault("sections", []).append(
             {
                 "id": sec_id,
