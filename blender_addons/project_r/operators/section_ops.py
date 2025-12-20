@@ -507,22 +507,39 @@ class PP_OT_create_section(bpy.types.Operator):
             full_paths[layer_id] = str(full_rel).replace("\\", "/")
             crop_paths[layer_id] = str(crop_rel).replace("\\", "/")
 
-        # ---- Generate Effective Mask (half-res) ----
-        # Single mask combining coverage + feathering
-
-        coverage_mask = _rasterize_coverage_mask(
+        # ---- Generate Effective Mask ----
+        # New approach: create mask in equirect space, reproject to Hammer, then crop
+        # This ensures the mask goes through the same projection as the images
+        
+        # 1. Create solid mask in equirect space (same size as world map)
+        equirect_mask = imaging.create_solid_mask_equirect(
+            width=int(global_size[0]),
+            height=int(global_size[1]),
             triangles_uv=selected_triangles_uv,
-            center=center,
-            rot_rad=0.0,
-            full_size=(full_w, full_h),
-            crop_rect=rect,
-            half_res=True,
         )
-
-        # Apply feathering to get the final effective mask
-        # Scale feather_px for half-res
+        print(f"[Project-R] Equirect mask created: {equirect_mask.shape}, coverage={np.sum(equirect_mask > 0.5)}")
+        
+        # 2. Reproject equirect mask to Hammer space (full canvas)
+        hammer_mask_full = project_equirect_to_hammer(
+            src_array=equirect_mask[..., None],  # Add channel dim
+            dst_size=(full_w, full_h),
+            params=params,
+            interp="linear",
+            treat_as_color=False,
+        )
+        hammer_mask_full = hammer_mask_full[:, :, 0]  # Remove channel dim
+        print(f"[Project-R] Hammer mask (full): {hammer_mask_full.shape}, coverage={np.sum(hammer_mask_full > 0.5)}")
+        
+        # 3. Crop to section bounds
+        x, y, w_crop, h_crop = rect.x, rect.y, rect.w, rect.h
+        coverage_mask_crop = hammer_mask_full[y:y+h_crop, x:x+w_crop]
+        
+        # 4. Downsample to half-res for mask storage
+        coverage_half = imaging.resize_half(coverage_mask_crop)
+        
+        # 5. Apply feathering (scale feather_px for half-res)
         effective_mask = imaging.generate_effective_mask(
-            coverage_mask,
+            coverage_half,
             feather_px=int(s.feather_px) // 2,
         )
         effective_rel = Path("sections") / sec_id / "effective_mask__crop.png"

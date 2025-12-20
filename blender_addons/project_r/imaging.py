@@ -321,6 +321,67 @@ def paint_uv_triangles_on_overlay(
     return out
 
 
+def create_solid_mask_equirect(
+    *,
+    width: int,
+    height: int,
+    triangles_uv: list[tuple[tuple[float, float], tuple[float, float], tuple[float, float]]],
+) -> "np.ndarray":
+    """
+    Create a solid grayscale mask in equirectangular space from UV triangles.
+
+    - Returns (H, W) float32 array with 1.0 where triangles cover, 0.0 elsewhere.
+    - UVs are in [0,1] with v=0 at bottom (Blender UV convention).
+    - Handles U seam by drawing wrapped triangles.
+    """
+    try:
+        from PIL import Image as PILImage  # type: ignore
+        from PIL import ImageDraw  # type: ignore
+    except Exception as e:
+        raise RuntimeError("Pillow is required for mask generation") from e
+
+    h, w = int(height), int(width)
+    # Create grayscale image
+    mask_img = PILImage.new("L", (w, h), 0)
+    draw = ImageDraw.Draw(mask_img)
+
+    def uv_to_xy(u: float, v: float) -> tuple[float, float]:
+        # PIL image coords: origin top-left; Blender UV v=0 is bottom.
+        x = u * w
+        y = (1.0 - v) * h
+        return (x, y)
+
+    for tri in triangles_uv:
+        (u0, v0), (u1, v1), (u2, v2) = tri
+        us = [u0, u1, u2]
+        span = max(us) - min(us)
+
+        if span > 0.5:
+            # Draw both shifted variants to cover across the seam.
+            # Variant A: shift low-u up by +1
+            tri_a = []
+            for (u, v) in tri:
+                if u < 0.5:
+                    u += 1.0
+                tri_a.append(uv_to_xy(u, v))
+            draw.polygon(tri_a, fill=255)
+
+            # Variant B: shift high-u down by -1
+            tri_b = []
+            for (u, v) in tri:
+                if u > 0.5:
+                    u -= 1.0
+                tri_b.append(uv_to_xy(u, v))
+            draw.polygon(tri_b, fill=255)
+        else:
+            pts = [uv_to_xy(u0, v0), uv_to_xy(u1, v1), uv_to_xy(u2, v2)]
+            draw.polygon(pts, fill=255)
+
+    # Convert to float32 normalized
+    out = np.asarray(mask_img, dtype=np.float32) / 255.0
+    return out
+
+
 def paint_uv_circles_on_overlay(
     overlay_rgba_u8: "np.ndarray",
     *,
