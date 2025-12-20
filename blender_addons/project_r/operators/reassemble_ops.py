@@ -148,14 +148,10 @@ class PP_OT_reassemble(bpy.types.Operator):
                     warnings.append(f"{sec_id}/{fname}: invalid dimensions, skipping")
                     continue
 
-                # Load coverage and feather masks
+                # Load effective mask (single combined mask, half-res)
                 masks_info = sec.get("masks", {}) or {}
-                coverage_rel = masks_info.get("coverage_path", "")
-                feather_rel = masks_info.get("feather_path", "")
+                effective_rel = masks_info.get("effective_mask_path", "")
                 res_scale = float(masks_info.get("resolution_scale", 0.5))
-
-                coverage_path = (root / coverage_rel).resolve() if coverage_rel else None
-                feather_path = (root / feather_rel).resolve() if feather_rel else None
 
                 # Load processed crop
                 try:
@@ -167,56 +163,39 @@ class PP_OT_reassemble(bpy.types.Operator):
                 if channels == 0:
                     channels = crop_img.channels
 
-                # Load coverage mask (half-res)
-                if coverage_path and coverage_path.exists():
-                    cov_buf = imaging.load_image(coverage_path)
-                    cov_half = cov_buf.pixels[:, :, 0] if cov_buf.channels >= 1 else cov_buf.pixels.squeeze()
-                    # Upscale to crop size
-                    cov_full = imaging.resize_double_bilinear(cov_half[..., None])[:, :, 0]
-                    # Clamp to crop size (may be off by 1 pixel)
-                    cov_full = cov_full[:h, :w]
-                    if cov_full.shape[0] < h or cov_full.shape[1] < w:
-                        # Pad if needed
-                        padded = np.zeros((h, w), dtype=np.float32)
-                        padded[: cov_full.shape[0], : cov_full.shape[1]] = cov_full
-                        cov_full = padded
-                else:
-                    # No coverage mask: use all-ones (whole crop is valid)
-                    cov_full = np.ones((h, w), dtype=np.float32)
-
-                # Load feather mask (half-res)
-                if feather_path and feather_path.exists():
-                    feath_buf = imaging.load_image(feather_path)
-                    feath_half = feath_buf.pixels[:, :, 0] if feath_buf.channels >= 1 else feath_buf.pixels.squeeze()
-                    # Upscale to crop size
-                    feath_full = imaging.resize_double_bilinear(feath_half[..., None])[:, :, 0]
-                    feath_full = feath_full[:h, :w]
-                    if feath_full.shape[0] < h or feath_full.shape[1] < w:
-                        padded = np.zeros((h, w), dtype=np.float32)
-                        padded[: feath_full.shape[0], : feath_full.shape[1]] = feath_full
-                        feath_full = padded
-                else:
-                    # Fallback to legacy weight mask
-                    weight_rel = sec.get("reassembly", {}).get("weight_mask_path", "")
-                    if weight_rel:
-                        weight_path = (root / weight_rel).resolve()
-                        if weight_path.exists():
-                            w_buf = imaging.load_image(weight_path)
-                            feath_full = w_buf.pixels[:, :, 0] if w_buf.channels >= 1 else w_buf.pixels.squeeze()
-                            feath_full = feath_full[:h, :w]
-                        else:
-                            feath_full = np.ones((h, w), dtype=np.float32)
+                # Load effective mask (half-res, already includes coverage + feathering)
+                effective_mask_crop: np.ndarray
+                coverage_for_extend: np.ndarray
+                if effective_rel:
+                    effective_path = (root / effective_rel).resolve()
+                    if effective_path.exists():
+                        eff_buf = imaging.load_image(effective_path)
+                        eff_half = eff_buf.pixels[:, :, 0] if eff_buf.channels >= 1 else eff_buf.pixels.squeeze()
+                        # Upscale to crop size
+                        eff_full = imaging.resize_double_bilinear(eff_half[..., None])[:, :, 0]
+                        # Clamp to crop size (may be off by 1 pixel)
+                        eff_full = eff_full[:h, :w]
+                        if eff_full.shape[0] < h or eff_full.shape[1] < w:
+                            padded = np.zeros((h, w), dtype=np.float32)
+                            padded[: eff_full.shape[0], : eff_full.shape[1]] = eff_full
+                            eff_full = padded
+                        effective_mask_crop = eff_full
+                        # For extend_nearest_valid, use thresholded mask as coverage
+                        coverage_for_extend = (eff_full > 0.01).astype(np.float32)
                     else:
-                        feath_full = np.ones((h, w), dtype=np.float32)
-
-                # Compute effective_mask = coverage * feather
-                effective_mask_crop = (cov_full * feath_full).astype(np.float32)
+                        # Mask file missing, use all-ones
+                        effective_mask_crop = np.ones((h, w), dtype=np.float32)
+                        coverage_for_extend = np.ones((h, w), dtype=np.float32)
+                else:
+                    # No mask info, use all-ones (backward compat)
+                    effective_mask_crop = np.ones((h, w), dtype=np.float32)
+                    coverage_for_extend = np.ones((h, w), dtype=np.float32)
 
                 # Apply nearest-valid extension to processed image
                 crop_pixels = crop_img.pixels
                 if crop_pixels.ndim == 2:
                     crop_pixels = crop_pixels[..., None]
-                crop_filled = imaging.extend_nearest_valid(crop_pixels, cov_full)
+                crop_filled = imaging.extend_nearest_valid(crop_pixels, coverage_for_extend)
 
                 # Uncrop to full Hammer canvas
                 full_img = imaging.paste_into(

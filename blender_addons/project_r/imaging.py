@@ -443,26 +443,42 @@ def distance_transform_edt(mask: np.ndarray, return_indices: bool = False):
         return _distance_transform_edt_fallback(valid_mask, return_indices=return_indices)
 
 
-def generate_feather_mask_from_coverage(
+def generate_effective_mask(
     coverage: np.ndarray,
     feather_px: int,
 ) -> np.ndarray:
     """
-    Generate a feather (blend weight) mask from a binary coverage mask.
+    Generate an effective blend mask from a binary coverage mask.
     
-    Feather weight combines:
-    - Distance to nearest unselected pixel (selection boundary)
-    - Distance to image edge
+    This is the SINGLE mask used for reassembly blending.
     
-    Result: 0..1 float array same size as coverage.
+    - 1.0 in the interior (well inside selection)
+    - Fades from 1.0 → 0.0 approaching selection boundary
+    - Additionally fades at image edges
+    - 0.0 outside selection
+    
+    Args:
+        coverage: Binary mask (H, W) or (H, W, 1), 1=inside selection, 0=outside
+        feather_px: Feather width in pixels
+    
+    Returns:
+        (H, W) float32 array with values 0..1
     """
     feather_px = max(1, int(feather_px))
     h, w = coverage.shape[:2]
     cov_2d = coverage.squeeze() if coverage.ndim > 2 else coverage
+    inside = (cov_2d >= 0.5).astype(np.uint8)
 
-    # Distance from selection boundary (inward)
-    # For valid pixels, measure distance to nearest invalid pixel
-    dist_to_boundary = distance_transform_edt((cov_2d >= 0.5).astype(np.uint8))
+    # Distance from INSIDE pixels to nearest OUTSIDE pixel (boundary)
+    # scipy.distance_transform_edt computes distance from 0s to nearest non-zero
+    # So we pass the INVERTED mask: 0 = inside, 1 = outside
+    # Result: inside pixels get distance to boundary, outside pixels get 0
+    inverted = 1 - inside
+    if HAS_SCIPY and _scipy_edt is not None:
+        dist_to_boundary = _scipy_edt(inverted).astype(np.float32)
+    else:
+        # Fallback: for each inside pixel, compute distance to nearest outside pixel
+        dist_to_boundary = _distance_transform_edt_fallback(inside, return_indices=False)
 
     # Distance to image edges
     yy, xx = np.mgrid[0:h, 0:w]
@@ -473,12 +489,12 @@ def generate_feather_mask_from_coverage(
 
     # Combine: take minimum of both distances, normalize by feather width
     combined = np.minimum(dist_to_boundary, dist_to_edge)
-    feather = np.clip(combined / float(feather_px), 0.0, 1.0)
+    mask = np.clip(combined / float(feather_px), 0.0, 1.0)
 
-    # Zero out outside coverage
-    feather = feather * (cov_2d >= 0.5).astype(np.float32)
+    # Zero out outside coverage (should already be 0 from dist_to_boundary, but be explicit)
+    mask = mask * inside.astype(np.float32)
 
-    return feather.astype(np.float32)
+    return mask.astype(np.float32)
 
 
 def extend_nearest_valid(

@@ -111,27 +111,12 @@ def _rasterize_coverage_mask(
 
     # Check which pixels are outside valid Hammer projection (NaN or outside range)
     valid_proj = np.isfinite(lon) & np.isfinite(lat)
-    
-    print(f"[Project-R] Coverage mask: valid_proj has {np.sum(valid_proj)} / {valid_proj.size} valid pixels")
-    if np.any(valid_proj):
-        print(f"[Project-R] lon range: {np.nanmin(lon):.4f} to {np.nanmax(lon):.4f}")
-        print(f"[Project-R] lat range: {np.nanmin(lat):.4f} to {np.nanmax(lat):.4f}")
 
     # Convert lon/lat to UV
     # lon in radians: -pi..pi -> U 0..1
     # lat in radians: -pi/2..pi/2 -> V 0..1
     u = (lon / (2 * np.pi) + 0.5) % 1.0
     v = (lat / np.pi + 0.5)
-
-    if np.any(valid_proj):
-        valid_u = u[valid_proj]
-        valid_v = v[valid_proj]
-        print(f"[Project-R] UV range: u=[{np.min(valid_u):.4f}, {np.max(valid_u):.4f}], v=[{np.min(valid_v):.4f}, {np.max(valid_v):.4f}]")
-    
-    # Show first triangle UV for comparison
-    if triangles_uv:
-        tri0 = triangles_uv[0]
-        print(f"[Project-R] First triangle UVs: {tri0}")
 
     # Now check if each UV point falls inside any selected triangle
     mask = np.zeros((out_h, out_w), dtype=np.float32)
@@ -177,9 +162,6 @@ def _rasterize_coverage_mask(
 
         mask = np.where(inside & valid_proj, 1.0, mask)
 
-    coverage_count = int(np.sum(mask > 0.5))
-    print(f"[Project-R] Coverage mask: {coverage_count} pixels covered out of {mask.size}")
-    
     return mask.astype(np.float32)
 
 
@@ -363,11 +345,8 @@ class PP_OT_create_section(bpy.types.Operator):
                 if uv_layer is not None:
                     seed_faces = {f for f in bm.faces if f.select}
                     selected_triangles_uv = _gather_uv_triangles_for_faces(bm, seed_faces, uv_layer)
-        except Exception as e:
-            print(f"[Project-R] Warning: could not gather UV triangles: {e}")
+        except Exception:
             selected_triangles_uv = []
-        
-        print(f"[Project-R] Gathered {len(selected_triangles_uv)} UV triangles from selection")
         center = geo.mean_center_lonlat(lonlats)
         params = ProjectionParams(
             center_lon_deg=math.degrees(center.lon),
@@ -393,9 +372,8 @@ class PP_OT_create_section(bpy.types.Operator):
                 uv_layer = bm.loops.layers.uv.active
                 if uv_layer is not None:
                     seed_faces = {f for f in bm.faces if f.select}
-                    grown_faces = _grow_faces(seed_faces, int(s.expand_selection_rings))
-
-                    centers_uv = _gather_uv_centers_for_faces(bm, grown_faces, uv_layer)
+                    # Only show actually selected faces in overlay (not grown)
+                    centers_uv = _gather_uv_centers_for_faces(bm, seed_faces, uv_layer)
 
                     # Deterministic per-section color
                     rr = random.Random(sec_id)
@@ -455,12 +433,13 @@ class PP_OT_create_section(bpy.types.Operator):
         # Use the world map size for Hammer full dimensions
         full_w = int(global_size[0])
         full_h = int(global_size[1])
+        # Use feather_px as the crop margin (no separate crop margin setting)
         rect = _compute_crop_rect(
             lonlats=lonlats,
             center=center,
             rot_rad=0.0,
             full_size=(full_w, full_h),
-            margin_px=int(s.crop_margin_px),
+            margin_px=int(s.feather_px),
             square=bool(s.square_crop),
         )
 
@@ -528,9 +507,8 @@ class PP_OT_create_section(bpy.types.Operator):
             full_paths[layer_id] = str(full_rel).replace("\\", "/")
             crop_paths[layer_id] = str(crop_rel).replace("\\", "/")
 
-        # ---- Generate Coverage Mask (half-res) ----
-        # Use triangles gathered at the start of execute (when bmesh was valid)
-        print(f"[Project-R] Rasterizing coverage mask with {len(selected_triangles_uv)} triangles...")
+        # ---- Generate Effective Mask (half-res) ----
+        # Single mask combining coverage + feathering
 
         coverage_mask = _rasterize_coverage_mask(
             triangles_uv=selected_triangles_uv,
@@ -540,35 +518,22 @@ class PP_OT_create_section(bpy.types.Operator):
             crop_rect=rect,
             half_res=True,
         )
-        coverage_rel = Path("sections") / sec_id / "coverage_mask__crop.png"
-        coverage_path = root / coverage_rel
-        coverage_buf = imaging.ImageBuffer(
-            width=coverage_mask.shape[1],
-            height=coverage_mask.shape[0],
-            channels=1,
-            pixels=coverage_mask[..., None],
-        )
-        imaging.save_image(coverage_buf, coverage_path, "PNG", color_depth="8")
 
-        # ---- Generate Feather Mask (half-res, from coverage) ----
-        feather_mask = imaging.generate_feather_mask_from_coverage(
+        # Apply feathering to get the final effective mask
+        # Scale feather_px for half-res
+        effective_mask = imaging.generate_effective_mask(
             coverage_mask,
-            feather_px=int(s.feather_px) // 2,  # Scale feather for half-res
+            feather_px=int(s.feather_px) // 2,
         )
-        feather_rel = Path("sections") / sec_id / "feather_mask__crop.png"
-        feather_path = root / feather_rel
-        feather_buf = imaging.ImageBuffer(
-            width=feather_mask.shape[1],
-            height=feather_mask.shape[0],
+        effective_rel = Path("sections") / sec_id / "effective_mask__crop.png"
+        effective_path = root / effective_rel
+        effective_buf = imaging.ImageBuffer(
+            width=effective_mask.shape[1],
+            height=effective_mask.shape[0],
             channels=1,
-            pixels=feather_mask[..., None],
+            pixels=effective_mask[..., None],
         )
-        imaging.save_image(feather_buf, feather_path, "PNG", color_depth="16")
-
-        # Legacy weight mask (edge-based, for backward compat)
-        weight = imaging.make_feather_weight_mask(rect.w, rect.h, int(s.feather_px))
-        weight_rel = Path("sections") / sec_id / "weightmask__crop.png"
-        imaging.save_image(weight, root / weight_rel, "PNG", color_depth="16")
+        imaging.save_image(effective_buf, effective_path, "PNG", color_depth="16")
 
         manifest.setdefault("sections", []).append(
             {
@@ -588,18 +553,15 @@ class PP_OT_create_section(bpy.types.Operator):
                 "crop": {
                     "used_square": bool(s.square_crop),
                     "rect_xywh": [int(rect.x), int(rect.y), int(rect.w), int(rect.h)],
-                    "margin_px": int(s.crop_margin_px),
                     "paths_by_layer": crop_paths,
                 },
                 "processed": {"expected_paths_by_layer": {}},
                 "masks": {
-                    "coverage_path": str(coverage_rel).replace("\\", "/"),
-                    "feather_path": str(feather_rel).replace("\\", "/"),
+                    "effective_mask_path": str(effective_rel).replace("\\", "/"),
                     "resolution_scale": 0.5,
                 },
                 "reassembly": {
                     "feather_px": int(s.feather_px),
-                    "weight_mask_path": str(weight_rel).replace("\\", "/"),
                 },
                 "created_from_selection": {
                     "mesh_object": context.active_object.name if context.active_object else "",

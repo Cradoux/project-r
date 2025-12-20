@@ -338,7 +338,7 @@ class PP_OT_load_world_map(Operator):
 class PP_OT_expand_selection(Operator):
     bl_idname = "pp.expand_selection"
     bl_label = "Expand Face Selection"
-    bl_description = "Expand the current face selection by N rings (Edit Mode only)"
+    bl_description = "Expand the current face selection by 1 ring (Edit Mode only)"
 
     def execute(self, context: bpy.types.Context):
         bm = _get_edit_bmesh(context)
@@ -346,12 +346,47 @@ class PP_OT_expand_selection(Operator):
             self.report({"ERROR"}, "Must be in Edit Mode with a mesh active")
             return {"CANCELLED"}
 
-        # Expand by 1 ring (hardcoded)
+        # Expand by 1 ring
         boundary = [f for f in bm.faces if f.select]
         for f in boundary:
             for e in f.edges:
                 for f2 in e.link_faces:
                     f2.select = True
+
+        bmesh.update_edit_mesh(context.active_object.data)
+        return {"FINISHED"}
+
+
+class PP_OT_shrink_selection(Operator):
+    bl_idname = "pp.shrink_selection"
+    bl_label = "Reduce Face Selection"
+    bl_description = "Shrink the current face selection by 1 ring (Edit Mode only)"
+
+    def execute(self, context: bpy.types.Context):
+        bm = _get_edit_bmesh(context)
+        if bm is None:
+            self.report({"ERROR"}, "Must be in Edit Mode with a mesh active")
+            return {"CANCELLED"}
+
+        # Find boundary faces: selected faces that have at least one edge
+        # touching an unselected face
+        to_deselect = []
+        for f in bm.faces:
+            if not f.select:
+                continue
+            is_boundary = False
+            for e in f.edges:
+                for f2 in e.link_faces:
+                    if not f2.select:
+                        is_boundary = True
+                        break
+                if is_boundary:
+                    break
+            if is_boundary:
+                to_deselect.append(f)
+
+        for f in to_deselect:
+            f.select = False
 
         bmesh.update_edit_mesh(context.active_object.data)
         return {"FINISHED"}
@@ -372,6 +407,7 @@ _CLASSES = (
     PP_OT_assign_preview_texture,
     PP_OT_load_world_map,
     PP_OT_expand_selection,
+    PP_OT_shrink_selection,
     PP_OT_set_overlay_opacity,
 )
 
