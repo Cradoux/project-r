@@ -447,10 +447,22 @@ class PP_OT_create_section(bpy.types.Operator):
         source_dir = root / "source"
         IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".exr", ".tif", ".tiff"}
         source_maps: List[Path] = []
+        
+        # Include the world map first (if it exists and isn't already in source/)
+        world_map_info = manifest.get("global", {}).get("world_map", {})
+        world_map_path_str = world_map_info.get("path", "")
+        if world_map_path_str:
+            world_map_path = Path(world_map_path_str)
+            if world_map_path.exists() and world_map_path.suffix.lower() in IMAGE_EXTENSIONS:
+                source_maps.append(world_map_path)
+        
+        # Add all maps from source/ folder
         if source_dir.exists():
             for f in source_dir.iterdir():
                 if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS:
-                    source_maps.append(f)
+                    # Avoid duplicates if world map is in source/
+                    if f.resolve() not in [p.resolve() for p in source_maps]:
+                        source_maps.append(f)
         
         full_paths: dict[str, str] = {}
         crop_paths: dict[str, str] = {}
