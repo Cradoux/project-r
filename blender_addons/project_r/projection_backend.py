@@ -266,6 +266,44 @@ def project_equirect_to_hammer(
     imaging.save_image(out_buf, dst_path, fmt, color_depth=depth)
 
 
+def project_equirect_array_to_hammer(
+    *,
+    data_in: np.ndarray,
+    dst_size: Tuple[int, int],
+    params: ProjectionParams,
+    interp: Interp,
+    treat_as_color: bool = False,
+) -> np.ndarray:
+    """
+    Reproject an in-memory array from Equirectangular to Hammer projection.
+    
+    Args:
+        data_in: (H, W) or (H, W, C) float32 array in equirect space
+        dst_size: (width, height) of output Hammer image
+        params: Projection parameters (center, rotation)
+        interp: Interpolation method
+        treat_as_color: Whether to apply sRGB conversion
+    
+    Returns:
+        (H, W) or (H, W, C) float32 array in Hammer space
+    """
+    # Ensure 3D
+    if data_in.ndim == 2:
+        data_in = data_in[..., None]
+    
+    out = _reproject_array(
+        data_in=data_in,
+        proj_in="Equirectangular",
+        proj_out="Hammer",
+        dst_size=dst_size,
+        aspect_in_deg=(0.0, 0.0, 0.0),
+        aspect_out_deg=(params.center_lon_deg, params.center_lat_deg, params.rot_deg),
+        interp=interp,
+        treat_as_color=treat_as_color,
+    )
+    return out.astype(np.float32)
+
+
 def project_hammer_to_equirect(
     *,
     src_path: Path,

@@ -14,7 +14,7 @@ import random
 from .. import geo
 from .. import imaging
 from .. import manifest as manifest_lib
-from ..projection_backend import ProjectionParams, project_equirect_to_hammer
+from ..projection_backend import ProjectionParams, project_equirect_to_hammer, project_equirect_array_to_hammer
 from ..vendor.projectionpasta import projectionpasta as pp
 from . import sphere_ops
 
@@ -520,8 +520,8 @@ class PP_OT_create_section(bpy.types.Operator):
         print(f"[Project-R] Equirect mask created: {equirect_mask.shape}, coverage={np.sum(equirect_mask > 0.5)}")
         
         # 2. Reproject equirect mask to Hammer space (full canvas)
-        hammer_mask_full = project_equirect_to_hammer(
-            src_array=equirect_mask[..., None],  # Add channel dim
+        hammer_mask_full = project_equirect_array_to_hammer(
+            data_in=equirect_mask[..., None],  # Add channel dim
             dst_size=(full_w, full_h),
             params=params,
             interp="linear",
