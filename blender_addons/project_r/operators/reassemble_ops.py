@@ -244,6 +244,18 @@ class PP_OT_reassemble(bpy.types.Operator):
                     base_layer = np.zeros((gh, gw, img_eq.shape[2]), dtype=np.float32)
                     accumulated_mask = np.zeros((gh, gw, 1), dtype=np.float32)
 
+                # Ensure channel count matches base layer
+                img_channels = img_eq.shape[2]
+                base_channels = base_layer.shape[2]
+                if img_channels < base_channels:
+                    # Pad with alpha=1 or zeros
+                    padding = np.ones((gh, gw, base_channels - img_channels), dtype=np.float32)
+                    img_eq = np.concatenate([img_eq, padding], axis=2)
+                elif img_channels > base_channels:
+                    # Expand base layer to match
+                    padding = np.ones((gh, gw, img_channels - base_channels), dtype=np.float32)
+                    base_layer = np.concatenate([base_layer, padding], axis=2)
+
                 # Max-mask overlap: update where new mask > accumulated
                 update = mask_eq > accumulated_mask
                 update_bc = np.broadcast_to(update, base_layer.shape)
