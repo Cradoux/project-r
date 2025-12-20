@@ -111,12 +111,27 @@ def _rasterize_coverage_mask(
 
     # Check which pixels are outside valid Hammer projection (NaN or outside range)
     valid_proj = np.isfinite(lon) & np.isfinite(lat)
+    
+    print(f"[Project-R] Coverage mask: valid_proj has {np.sum(valid_proj)} / {valid_proj.size} valid pixels")
+    if np.any(valid_proj):
+        print(f"[Project-R] lon range: {np.nanmin(lon):.4f} to {np.nanmax(lon):.4f}")
+        print(f"[Project-R] lat range: {np.nanmin(lat):.4f} to {np.nanmax(lat):.4f}")
 
     # Convert lon/lat to UV
     # lon in radians: -pi..pi -> U 0..1
     # lat in radians: -pi/2..pi/2 -> V 0..1
     u = (lon / (2 * np.pi) + 0.5) % 1.0
     v = (lat / np.pi + 0.5)
+
+    if np.any(valid_proj):
+        valid_u = u[valid_proj]
+        valid_v = v[valid_proj]
+        print(f"[Project-R] UV range: u=[{np.min(valid_u):.4f}, {np.max(valid_u):.4f}], v=[{np.min(valid_v):.4f}, {np.max(valid_v):.4f}]")
+    
+    # Show first triangle UV for comparison
+    if triangles_uv:
+        tri0 = triangles_uv[0]
+        print(f"[Project-R] First triangle UVs: {tri0}")
 
     # Now check if each UV point falls inside any selected triangle
     mask = np.zeros((out_h, out_w), dtype=np.float32)
@@ -162,6 +177,9 @@ def _rasterize_coverage_mask(
 
         mask = np.where(inside & valid_proj, 1.0, mask)
 
+    coverage_count = int(np.sum(mask > 0.5))
+    print(f"[Project-R] Coverage mask: {coverage_count} pixels covered out of {mask.size}")
+    
     return mask.astype(np.float32)
 
 
@@ -334,6 +352,22 @@ class PP_OT_create_section(bpy.types.Operator):
             return {"CANCELLED"}
 
         face_indices = _selected_face_indices(context)
+
+        # Gather UV triangles NOW while bmesh is definitely valid (for coverage mask later)
+        selected_triangles_uv: List[Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]] = []
+        try:
+            obj = context.active_object
+            if obj is not None and obj.type == "MESH" and context.mode == "EDIT_MESH":
+                bm = bmesh.from_edit_mesh(obj.data)
+                uv_layer = bm.loops.layers.uv.active
+                if uv_layer is not None:
+                    seed_faces = {f for f in bm.faces if f.select}
+                    selected_triangles_uv = _gather_uv_triangles_for_faces(bm, seed_faces, uv_layer)
+        except Exception as e:
+            print(f"[Project-R] Warning: could not gather UV triangles: {e}")
+            selected_triangles_uv = []
+        
+        print(f"[Project-R] Gathered {len(selected_triangles_uv)} UV triangles from selection")
         center = geo.mean_center_lonlat(lonlats)
         params = ProjectionParams(
             center_lon_deg=math.degrees(center.lon),
@@ -495,18 +529,11 @@ class PP_OT_create_section(bpy.types.Operator):
             crop_paths[layer_id] = str(crop_rel).replace("\\", "/")
 
         # ---- Generate Coverage Mask (half-res) ----
-        # Gather UV triangles from selected faces
-        try:
-            obj = context.active_object
-            bm = bmesh.from_edit_mesh(obj.data)
-            uv_layer = bm.loops.layers.uv.active
-            seed_faces = {f for f in bm.faces if f.select}
-            triangles_uv = _gather_uv_triangles_for_faces(bm, seed_faces, uv_layer)
-        except Exception:
-            triangles_uv = []
+        # Use triangles gathered at the start of execute (when bmesh was valid)
+        print(f"[Project-R] Rasterizing coverage mask with {len(selected_triangles_uv)} triangles...")
 
         coverage_mask = _rasterize_coverage_mask(
-            triangles_uv=triangles_uv,
+            triangles_uv=selected_triangles_uv,
             center=center,
             rot_rad=0.0,
             full_size=(full_w, full_h),
