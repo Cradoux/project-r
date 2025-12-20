@@ -214,11 +214,22 @@ project/
 
 ---
 
+## License
+
+Project-R is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
+
+This is required because Project-R incorporates the projectionpasta library, which is GPL-3.0 licensed. See the [LICENSE](LICENSE) file for full details.
+
+You are free to use, modify, and distribute this software under the terms of the GPL-3.0.
+
+---
+
 ## Credits
 
 ### Projection Engine
 Project-R uses **projectionpasta** by Nikolai Hersfeldt / Mads de Silva for the core projection mathematics.
 - Repository: [github.com/hersfeldtn/projectionpasta](https://github.com/hersfeldtn/projectionpasta)
+- License: GPL-3.0
 - Vendored under `blender_addons/project_r/vendor/projectionpasta/`
 
 ### Workflow Inspiration
