@@ -505,8 +505,21 @@ def generate_effective_mask(
         np.minimum(yy, (h - 1) - yy),
     ).astype(np.float32)
 
+    print(f"[Project-R] dist_to_edge: min={np.min(dist_to_edge):.2f}, max={np.max(dist_to_edge):.2f}")
+
+    # Check dist_to_boundary for INSIDE pixels only
+    inside_mask = inside > 0.5
+    if np.any(inside_mask):
+        dist_inside = dist_to_boundary[inside_mask]
+        print(f"[Project-R] dist_to_boundary (inside only): min={np.min(dist_inside):.2f}, max={np.max(dist_inside):.2f}")
+
     # Combine: take minimum of both distances, normalize by feather width
     combined = np.minimum(dist_to_boundary, dist_to_edge)
+    
+    if np.any(inside_mask):
+        comb_inside = combined[inside_mask]
+        print(f"[Project-R] combined (inside only): min={np.min(comb_inside):.2f}, max={np.max(comb_inside):.2f}")
+    
     mask = np.clip(combined / float(feather_px), 0.0, 1.0)
 
     # Zero out outside coverage
