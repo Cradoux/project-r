@@ -468,17 +468,29 @@ def generate_effective_mask(
     h, w = coverage.shape[:2]
     cov_2d = coverage.squeeze() if coverage.ndim > 2 else coverage
     inside = (cov_2d >= 0.5).astype(np.uint8)
+    
+    inside_count = int(np.sum(inside))
+    print(f"[Project-R] generate_effective_mask: {inside_count} inside pixels, feather={feather_px}px, scipy={HAS_SCIPY}")
+
+    # If no inside pixels, return zeros
+    if inside_count == 0:
+        return np.zeros((h, w), dtype=np.float32)
 
     # Distance from INSIDE pixels to nearest OUTSIDE pixel (boundary)
-    # scipy.distance_transform_edt computes distance from 0s to nearest non-zero
-    # So we pass the INVERTED mask: 0 = inside, 1 = outside
-    # Result: inside pixels get distance to boundary, outside pixels get 0
-    inverted = 1 - inside
+    # We need to find, for each inside pixel, how far it is from the boundary
+    outside = 1 - inside  # 1 = outside, 0 = inside
+    
     if HAS_SCIPY and _scipy_edt is not None:
-        dist_to_boundary = _scipy_edt(inverted).astype(np.float32)
+        # scipy.distance_transform_edt: computes distance from 0-pixels to nearest non-zero
+        # Pass `outside` (1=outside, 0=inside): inside pixels (0) get distance to nearest outside (non-zero)
+        dist_to_boundary = _scipy_edt(outside).astype(np.float32)
     else:
-        # Fallback: for each inside pixel, compute distance to nearest outside pixel
-        dist_to_boundary = _distance_transform_edt_fallback(inside, return_indices=False)
+        # Fallback: find distance from each pixel to nearest outside pixel
+        # The fallback finds distance TO pixels where mask > 0.5
+        # So pass `outside` (1=outside) to find distance to outside
+        dist_to_boundary = _distance_transform_edt_fallback(outside, return_indices=False)
+
+    print(f"[Project-R] dist_to_boundary: min={np.min(dist_to_boundary):.2f}, max={np.max(dist_to_boundary):.2f}")
 
     # Distance to image edges
     yy, xx = np.mgrid[0:h, 0:w]
@@ -491,8 +503,10 @@ def generate_effective_mask(
     combined = np.minimum(dist_to_boundary, dist_to_edge)
     mask = np.clip(combined / float(feather_px), 0.0, 1.0)
 
-    # Zero out outside coverage (should already be 0 from dist_to_boundary, but be explicit)
+    # Zero out outside coverage
     mask = mask * inside.astype(np.float32)
+    
+    print(f"[Project-R] effective_mask: min={np.min(mask):.4f}, max={np.max(mask):.4f}")
 
     return mask.astype(np.float32)
 
