@@ -8,6 +8,7 @@ import bpy
 from bpy.props import (
     BoolProperty,
     EnumProperty,
+    FloatProperty,
     IntProperty,
     StringProperty,
 )
@@ -125,6 +126,15 @@ class ProjectionPastaProjectSettings(PropertyGroup):
         name="Extend Edge Colors",
         description="Fill empty areas by extending colors from nearest section edges (useful for ocean)",
         default=False,
+    )
+
+    # Planet/world settings
+    planet_radius_km: FloatProperty(  # type: ignore[valid-type]
+        name="Planet Radius (km)",
+        description="Radius of the planet in kilometers (Earth = 6371)",
+        default=6371.0,
+        min=100.0,
+        soft_max=100000.0,
     )
 
     # Paths derived

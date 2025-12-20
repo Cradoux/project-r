@@ -72,6 +72,57 @@ def _treat_as_color_name(name: str) -> bool:
     return ext in (".png", ".jpg", ".jpeg")
 
 
+def _resample_image(
+    pixels: np.ndarray,
+    scale_factor: float,
+) -> np.ndarray:
+    """
+    Resample an image by a scale factor using bilinear interpolation.
+    scale_factor > 1 = upscale (finer resolution), < 1 = downscale.
+    """
+    if abs(scale_factor - 1.0) < 0.001:
+        return pixels
+    
+    h, w = pixels.shape[:2]
+    new_h = max(1, int(round(h * scale_factor)))
+    new_w = max(1, int(round(w * scale_factor)))
+    
+    # Ensure we have 3D array
+    if pixels.ndim == 2:
+        pixels = pixels[..., None]
+    channels = pixels.shape[2]
+    
+    # Create coordinate grids for the new size
+    y_new = np.linspace(0, h - 1, new_h)
+    x_new = np.linspace(0, w - 1, new_w)
+    xx, yy = np.meshgrid(x_new, y_new)
+    
+    # Bilinear interpolation
+    x0 = np.floor(xx).astype(int)
+    y0 = np.floor(yy).astype(int)
+    x1 = np.minimum(x0 + 1, w - 1)
+    y1 = np.minimum(y0 + 1, h - 1)
+    
+    dx = xx - x0
+    dy = yy - y0
+    
+    output = np.zeros((new_h, new_w, channels), dtype=pixels.dtype)
+    for c in range(channels):
+        p = pixels[:, :, c]
+        v00 = p[y0, x0]
+        v01 = p[y0, x1]
+        v10 = p[y1, x0]
+        v11 = p[y1, x1]
+        output[:, :, c] = (
+            v00 * (1 - dx) * (1 - dy) +
+            v01 * dx * (1 - dy) +
+            v10 * (1 - dx) * dy +
+            v11 * dx * dy
+        )
+    
+    return output
+
+
 class PP_OT_reassemble(bpy.types.Operator):
     bl_idname = "pp.reassemble"
     bl_label = "Reassemble"
@@ -112,6 +163,30 @@ class PP_OT_reassemble(bpy.types.Operator):
                 fname = p.name
                 groups.setdefault(fname, []).append((sec, p))
 
+        # Find the target km/pixel ratio for resolution normalization
+        # Use the finest (smallest km/pixel) across all sections that have processed files
+        all_km_per_pixel: List[Tuple[str, float]] = []
+        for sec in sections:
+            sec_id = sec.get("id", "")
+            size_info = sec.get("size_info", {})
+            km_per_pixel = float(size_info.get("km_per_pixel", 0.0))
+            if km_per_pixel > 0:
+                proc_dir = root / "processed" / sec_id
+                if proc_dir.exists() and any(proc_dir.iterdir()):
+                    all_km_per_pixel.append((sec_id, km_per_pixel))
+        
+        target_km_per_pixel: float = 0.0
+        if all_km_per_pixel:
+            target_km_per_pixel = min(kpp for _, kpp in all_km_per_pixel)
+            # Report if sections have different resolutions
+            unique_kpp = set(round(kpp, 4) for _, kpp in all_km_per_pixel)
+            if len(unique_kpp) > 1:
+                print(f"[Project-R] Resolution normalization enabled. Target: {target_km_per_pixel:.4f} km/pixel")
+                for sec_id, kpp in all_km_per_pixel:
+                    if abs(kpp - target_km_per_pixel) > 0.0001:
+                        scale_factor = kpp / target_km_per_pixel
+                        print(f"[Project-R]   - {sec_id}: {kpp:.4f} km/pixel -> will scale by {scale_factor:.2f}x")
+
         if not groups:
             self.report({"ERROR"}, "No processed files found under processed/<section_id>/")
             return {"CANCELLED"}
@@ -147,6 +222,14 @@ class PP_OT_reassemble(bpy.types.Operator):
                 if full_w <= 0 or full_h <= 0 or w <= 0 or h <= 0:
                     warnings.append(f"{sec_id}/{fname}: invalid dimensions, skipping")
                     continue
+                
+                # Calculate scale factor for resolution normalization
+                size_info = sec.get("size_info", {})
+                sec_km_per_pixel = float(size_info.get("km_per_pixel", 0.0))
+                scale_factor = 1.0
+                if target_km_per_pixel > 0 and sec_km_per_pixel > 0:
+                    # scale_factor > 1 means section is coarser and needs upscaling
+                    scale_factor = sec_km_per_pixel / target_km_per_pixel
 
                 # Load effective mask (single combined mask, half-res)
                 masks_info = sec.get("masks", {}) or {}
@@ -197,28 +280,48 @@ class PP_OT_reassemble(bpy.types.Operator):
                     crop_pixels = crop_pixels[..., None]
                 crop_filled = imaging.extend_nearest_valid(crop_pixels, coverage_for_extend)
 
-                # Uncrop to full Hammer canvas
+                # Apply resolution normalization if needed
+                if abs(scale_factor - 1.0) > 0.001:
+                    # Resample the processed image to match target resolution
+                    crop_filled = _resample_image(crop_filled.astype(np.float32), scale_factor)
+                    effective_mask_crop = _resample_image(effective_mask_crop[..., None].astype(np.float32), scale_factor)[:, :, 0]
+                    
+                    # Adjust crop dimensions and position for the scaled image
+                    new_w = crop_filled.shape[1]
+                    new_h = crop_filled.shape[0]
+                    
+                    # Scale the full canvas proportionally
+                    scaled_full_w = int(round(full_w * scale_factor))
+                    scaled_full_h = int(round(full_h * scale_factor))
+                    scaled_x = int(round(x * scale_factor))
+                    scaled_y = int(round(y * scale_factor))
+                else:
+                    new_w, new_h = w, h
+                    scaled_full_w, scaled_full_h = full_w, full_h
+                    scaled_x, scaled_y = x, y
+
+                # Uncrop to full Hammer canvas (use scaled dimensions if resampled)
                 full_img = imaging.paste_into(
-                    dst_size=(full_w, full_h),
+                    dst_size=(scaled_full_w, scaled_full_h),
                     dst_channels=crop_filled.shape[2],
                     src=imaging.ImageBuffer(
-                        width=w,
-                        height=h,
+                        width=new_w,
+                        height=new_h,
                         channels=crop_filled.shape[2],
-                        pixels=crop_filled[:h, :w, :],
+                        pixels=crop_filled[:new_h, :new_w, :].astype(np.float32),
                     ),
-                    rect_xywh=(x, y, w, h),
+                    rect_xywh=(scaled_x, scaled_y, new_w, new_h),
                 )
                 full_mask = imaging.paste_into(
-                    dst_size=(full_w, full_h),
+                    dst_size=(scaled_full_w, scaled_full_h),
                     dst_channels=1,
                     src=imaging.ImageBuffer(
-                        width=w,
-                        height=h,
+                        width=new_w,
+                        height=new_h,
                         channels=1,
-                        pixels=effective_mask_crop[:h, :w, None],
+                        pixels=effective_mask_crop[:new_h, :new_w, None].astype(np.float32),
                     ),
-                    rect_xywh=(x, y, w, h),
+                    rect_xywh=(scaled_x, scaled_y, new_w, new_h),
                 )
 
                 # Reproject to global equirect

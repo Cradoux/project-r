@@ -28,6 +28,7 @@ class PP_PT_main(Panel):
         box = layout.box()
         box.label(text="Project")
         box.prop(s, "project_root")
+        box.prop(s, "planet_radius_km")
         row = box.row(align=True)
         row.operator("pp.init_project", text="Init Project")
         row.operator("pp.open_manifest", text="Open manifest.json")

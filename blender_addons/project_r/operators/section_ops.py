@@ -354,6 +354,18 @@ class PP_OT_create_section(bpy.types.Operator):
             rot_deg=0.0,
         )
 
+        # Compute lon/lat bounds for physical extent calculation
+        min_lon_deg, max_lon_deg, min_lat_deg, max_lat_deg = geo.compute_lonlat_bounds(lonlats)
+        lon_range_deg = max_lon_deg - min_lon_deg
+        lat_range_deg = max_lat_deg - min_lat_deg
+        
+        # Handle dateline crossing (lon range > 180 means we crossed the -180/180 boundary)
+        if lon_range_deg > 180.0:
+            lon_range_deg = 360.0 - lon_range_deg
+        
+        # Get planet radius from settings
+        planet_radius_km = s.planet_radius_km
+
         manifest = manifest_lib.read_manifest(mp)
         global_size = manifest.get("global", {}).get("size", [0, 0])
         if not global_size or global_size[0] <= 0 or global_size[1] <= 0:
@@ -442,6 +454,21 @@ class PP_OT_create_section(bpy.types.Operator):
             margin_px=int(s.feather_px),
             square=bool(s.square_crop),
         )
+
+        # Compute physical extent in kilometers
+        extent_width_km, extent_height_km = geo.compute_section_extent_km(
+            center_lon_deg=math.degrees(center.lon),
+            center_lat_deg=math.degrees(center.lat),
+            lon_range_deg=lon_range_deg,
+            lat_range_deg=lat_range_deg,
+            planet_radius_km=planet_radius_km,
+        )
+        
+        # Calculate km per pixel for the crop
+        # Use the larger dimension for a consistent scale reference
+        crop_diagonal_px = math.sqrt(rect.w**2 + rect.h**2)
+        extent_diagonal_km = math.sqrt(extent_width_km**2 + extent_height_km**2)
+        km_per_pixel = extent_diagonal_km / crop_diagonal_px if crop_diagonal_px > 0 else 0.0
 
         # Scan source/ folder for all image files to process
         source_dir = root / "source"
@@ -592,6 +619,12 @@ class PP_OT_create_section(bpy.types.Operator):
                     "rect_xywh": [int(rect.x), int(rect.y), int(rect.w), int(rect.h)],
                     "paths_by_layer": crop_paths,
                 },
+                "size_info": {
+                    "planet_radius_km": planet_radius_km,
+                    "extent_km": [round(extent_width_km, 2), round(extent_height_km, 2)],
+                    "km_per_pixel": round(km_per_pixel, 4),
+                    "crop_pixels": [rect.w, rect.h],
+                },
                 "processed": {"expected_paths_by_layer": {}},
                 "masks": {
                     "effective_mask_path": str(effective_rel).replace("\\", "/"),
@@ -610,9 +643,14 @@ class PP_OT_create_section(bpy.types.Operator):
         )
 
         manifest_lib.write_manifest(mp, manifest)
+        
+        # Also update planet_radius_km in global settings
+        manifest["global"]["planet_radius_km"] = planet_radius_km
+        manifest_lib.write_manifest(mp, manifest)
+        
         self.report(
             {"INFO"},
-            f"Created section {sec_id} (center: {params.center_lon_deg:.2f}, {params.center_lat_deg:.2f})",
+            f"Created section '{s.new_section_name}' - {extent_width_km:.0f} x {extent_height_km:.0f} km ({km_per_pixel:.2f} km/pixel)",
         )
         return {"FINISHED"}
 

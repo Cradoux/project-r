@@ -51,13 +51,19 @@ Place all your equirectangular maps in the `source/` subfolder:
 
 **Important:** All maps must be the same dimensions with a 2:1 aspect ratio (e.g., 8192×4096).
 
-### Step 3: Initialize the Project
+### Step 3: Set Planet Radius
+Set the **Planet Radius (km)** value in the Project panel:
+- Default: 6371 km (Earth's radius)
+- This is used to calculate the physical size of each section in kilometers
+- Important for consistent erosion/terrain processing in Gaea
+
+### Step 4: Initialize the Project
 1. In the Project-R panel, set **Project Root** to your project folder
 2. Click **Init Project**
    - This creates the folder structure and `manifest.json`
    - If loading an existing project, it will automatically load the world map
 
-### Step 4: Load the World Map
+### Step 5: Load the World Map
 1. Click **Load World Map**
 2. Select your color map (this will be displayed on the sphere for visual reference)
 3. A UV sphere will be created with your map applied
@@ -118,6 +124,27 @@ project/
 │       └── effective_mask__crop.png  ← Blend mask for this section
 ```
 
+### Section Size Information
+When you create a section, the addon reports the physical size:
+```
+Created section 'Northern Continent' - 1200 x 1400 km (0.85 km/pixel)
+```
+
+This information is also stored in `manifest.json`:
+```json
+"size_info": {
+  "planet_radius_km": 6371.0,
+  "extent_km": [1200.5, 1400.2],
+  "km_per_pixel": 0.85,
+  "crop_pixels": [1410, 1648]
+}
+```
+
+**Why this matters for Gaea:**
+- Use `extent_km` values to set Gaea's **Map Size** parameter
+- This ensures erosion, rivers, and features are at realistic scales
+- Different continents can have different sizes - the addon handles this during reassembly
+
 ### Visual Feedback
 - The sphere overlay shows colored circles where sections have been extracted
 - Adjust **Overlay Opacity** to see the coverage
@@ -157,6 +184,14 @@ Click **Validate** to check that all sections have processed files.
 
 ### Step 3: Reassemble
 Click **Reassemble**
+
+### Resolution Normalization
+If your sections cover different physical areas (different km/pixel ratios), the addon automatically resamples them during reassembly to maintain consistent detail across the globe. This ensures that:
+- A small island section with fine detail (0.5 km/pixel)
+- And a large continent with coarser detail (1.0 km/pixel)
+- Will blend together smoothly without visible resolution differences
+
+The console will report which sections are being resampled.
 
 ### Output
 Reassembled maps appear in:

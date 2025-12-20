@@ -136,3 +136,50 @@ def unit_xy_to_pixel(x: float, y: float, width: int, height: int) -> Tuple[float
     return px, py
 
 
+def compute_section_extent_km(
+    center_lon_deg: float,
+    center_lat_deg: float,
+    lon_range_deg: float,
+    lat_range_deg: float,
+    planet_radius_km: float,
+) -> Tuple[float, float]:
+    """
+    Compute approximate width x height in km for a section.
+
+    Args:
+        center_lon_deg: Center longitude in degrees
+        center_lat_deg: Center latitude in degrees
+        lon_range_deg: Total longitude span in degrees
+        lat_range_deg: Total latitude span in degrees
+        planet_radius_km: Planet radius in kilometers
+
+    Returns:
+        (width_km, height_km) tuple
+    """
+    lat_rad = math.radians(center_lat_deg)
+
+    # Height (N-S): arc length along meridian (same at any longitude)
+    height_km = math.radians(lat_range_deg) * planet_radius_km
+
+    # Width (E-W): arc length at center latitude (shrinks toward poles)
+    width_km = math.radians(lon_range_deg) * planet_radius_km * math.cos(lat_rad)
+
+    return (abs(width_km), abs(height_km))
+
+
+def compute_lonlat_bounds(points: Sequence[LonLat]) -> Tuple[float, float, float, float]:
+    """
+    Compute the bounding box of lon/lat points in degrees.
+
+    Returns:
+        (min_lon_deg, max_lon_deg, min_lat_deg, max_lat_deg)
+    """
+    if not points:
+        return (0.0, 0.0, 0.0, 0.0)
+
+    lons = [math.degrees(p.lon) for p in points]
+    lats = [math.degrees(p.lat) for p in points]
+
+    return (min(lons), max(lons), min(lats), max(lats))
+
+
