@@ -120,6 +120,13 @@ class ProjectionPastaProjectSettings(PropertyGroup):
         max=50,
     )
 
+    # Reassembly options
+    extend_edge_colors: BoolProperty(  # type: ignore[valid-type]
+        name="Extend Edge Colors",
+        description="Fill empty areas by extending colors from nearest section edges (useful for ocean)",
+        default=False,
+    )
+
     # Paths derived
     def project_root_path(self) -> Optional[Path]:
         p = Path(bpy.path.abspath(self.project_root)).resolve()

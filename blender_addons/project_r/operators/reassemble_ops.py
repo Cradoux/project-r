@@ -266,6 +266,12 @@ class PP_OT_reassemble(bpy.types.Operator):
             if base_layer is None:
                 continue
 
+            # Optionally extend edge colors to fill empty areas
+            if s.extend_edge_colors and accumulated_mask is not None:
+                # Coverage mask: 1 where we have data, 0 where empty
+                coverage_2d = (accumulated_mask[:, :, 0] > 0.01).astype(np.float32)
+                base_layer = imaging.extend_nearest_valid(base_layer, coverage_2d)
+
             out_path = out_dir / fname
             out_buf = imaging.ImageBuffer(
                 width=gw,

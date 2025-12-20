@@ -50,6 +50,7 @@ class PP_PT_main(Panel):
 
         box = layout.box()
         box.label(text="Reassembly")
+        box.prop(s, "extend_edge_colors")
         row = box.row(align=True)
         row.operator("pp.validate_processed", text="Validate")
         row.operator("pp.reassemble", text="Reassemble")
