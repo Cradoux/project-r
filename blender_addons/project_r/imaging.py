@@ -477,9 +477,10 @@ def generate_effective_mask(
         return np.zeros((h, w), dtype=np.float32)
 
     # Distance from INSIDE pixels to nearest OUTSIDE pixel (boundary)
-    # We need to find, for each inside pixel, how far it is from the boundary
-    outside = 1 - inside  # 1 = outside, 0 = inside
-    outside_count = int(np.sum(outside))
+    # scipy.distance_transform_edt(mask) computes, for each FOREGROUND (non-zero) pixel,
+    # the distance to the nearest BACKGROUND (zero) pixel.
+    # So we pass `inside` (1=inside, 0=outside): inside pixels get distance to nearest outside.
+    outside_count = int(np.sum(1 - inside))
     
     if outside_count == 0:
         # No outside pixels in crop - selection fills entire crop area
@@ -487,14 +488,13 @@ def generate_effective_mask(
         print(f"[Project-R] No outside pixels in crop - using edge-only feathering")
         dist_to_boundary = np.full((h, w), float(max(h, w)), dtype=np.float32)
     elif HAS_SCIPY and _scipy_edt is not None:
-        # scipy.distance_transform_edt: computes distance from 0-pixels to nearest non-zero
-        # Pass `outside` (1=outside, 0=inside): inside pixels (0) get distance to nearest outside (non-zero)
-        dist_to_boundary = _scipy_edt(outside).astype(np.float32)
+        # scipy.distance_transform_edt on `inside`:
+        # - For inside=1 (foreground): distance to nearest inside=0 (background/outside)
+        # - For inside=0 (background): 0
+        dist_to_boundary = _scipy_edt(inside).astype(np.float32)
     else:
-        # Fallback: find distance from each pixel to nearest outside pixel
-        # The fallback finds distance TO pixels where mask > 0.5
-        # So pass `outside` (1=outside) to find distance to outside
-        dist_to_boundary = _distance_transform_edt_fallback(outside, return_indices=False)
+        # Fallback: pass inverted mask so it finds distance TO outside pixels
+        dist_to_boundary = _distance_transform_edt_fallback(1 - inside, return_indices=False)
 
     print(f"[Project-R] dist_to_boundary: min={np.min(dist_to_boundary):.2f}, max={np.max(dist_to_boundary):.2f}, outside_px={outside_count}")
 
