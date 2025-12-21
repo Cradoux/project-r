@@ -26,10 +26,20 @@ def is_scipy_available() -> bool:
         return False
 
 
+def is_pillow_available() -> bool:
+    try:
+        from PIL import Image
+        # Verify the C extension actually works (this is what fails for the user)
+        Image.new("RGB", (1, 1))
+        return True
+    except Exception:
+        return False
+
+
 class PP_OT_install_dependencies(Operator):
     bl_idname = "pp.install_dependencies"
-    bl_label = "Install Dependencies (scipy)"
-    bl_description = "Install scipy using Blender's Python pip"
+    bl_label = "Install Dependencies"
+    bl_description = "Install required packages (Pillow, scipy) using Blender's Python pip"
 
     def execute(self, context):
         python = sys.executable
@@ -39,16 +49,33 @@ class PP_OT_install_dependencies(Operator):
         except Exception:
             pass  # pip may already be available
 
+        errors = []
+
+        # Install/reinstall Pillow (force-reinstall to fix corrupted C extensions)
+        try:
+            subprocess.check_call([
+                python, "-m", "pip", "install",
+                "--upgrade", "--force-reinstall", "Pillow"
+            ])
+        except subprocess.CalledProcessError as e:
+            errors.append(f"Pillow: {e}")
+        except Exception as e:
+            errors.append(f"Pillow: {e}")
+
+        # Install scipy
         try:
             subprocess.check_call([python, "-m", "pip", "install", "--upgrade", "scipy"])
-            self.report({"INFO"}, "scipy installed successfully! Please restart Blender.")
-            return {"FINISHED"}
         except subprocess.CalledProcessError as e:
-            self.report({"ERROR"}, f"Failed to install scipy: {e}")
-            return {"CANCELLED"}
+            errors.append(f"scipy: {e}")
         except Exception as e:
-            self.report({"ERROR"}, f"Unexpected error: {e}")
+            errors.append(f"scipy: {e}")
+
+        if errors:
+            self.report({"ERROR"}, f"Failed to install: {'; '.join(errors)}")
             return {"CANCELLED"}
+
+        self.report({"INFO"}, "Dependencies installed successfully! Please restart Blender.")
+        return {"FINISHED"}
 
 
 from . import props as _props

@@ -3,7 +3,7 @@ from __future__ import annotations
 import bpy
 from bpy.types import Panel
 
-from . import is_scipy_available
+from . import is_scipy_available, is_pillow_available
 
 
 class PP_PT_main(Panel):
@@ -18,11 +18,17 @@ class PP_PT_main(Panel):
         layout = self.layout
 
         # Dependencies check
+        missing_deps = []
+        if not is_pillow_available():
+            missing_deps.append("Pillow")
         if not is_scipy_available():
+            missing_deps.append("scipy")
+
+        if missing_deps:
             box = layout.box()
             box.alert = True
-            box.label(text="scipy not installed!", icon="ERROR")
-            box.operator("pp.install_dependencies", text="Install scipy")
+            box.label(text=f"Missing: {', '.join(missing_deps)}", icon="ERROR")
+            box.operator("pp.install_dependencies", text="Install Dependencies")
             box.label(text="(Restart Blender after install)")
 
         box = layout.box()
