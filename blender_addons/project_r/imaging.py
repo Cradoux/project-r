@@ -333,6 +333,8 @@ def create_solid_mask_equirect(
     - Returns (H, W) float32 array with 1.0 where triangles cover, 0.0 elsewhere.
     - UVs are in [0,1] with v=0 at bottom (Blender UV convention).
     - Handles U seam by drawing wrapped triangles.
+    - Handles poles: UV spheres have a singularity at the poles where all triangles
+      meet at a point. We detect this and fill the pole row if triangles touch it.
     """
     try:
         from PIL import Image as PILImage  # type: ignore
@@ -351,10 +353,23 @@ def create_solid_mask_equirect(
         y = (1.0 - v) * h
         return (x, y)
 
+    # Track if triangles touch the poles
+    # v=0 is south pole (bottom of UV), v=1 is north pole (top of UV)
+    pole_threshold = 0.01  # Triangles with v within this of 0 or 1 are at poles
+    touches_south_pole = False
+    touches_north_pole = False
+
     for tri in triangles_uv:
         (u0, v0), (u1, v1), (u2, v2) = tri
         us = [u0, u1, u2]
+        vs = [v0, v1, v2]
         span = max(us) - min(us)
+
+        # Check for pole-touching triangles
+        if min(vs) < pole_threshold:
+            touches_south_pole = True
+        if max(vs) > (1.0 - pole_threshold):
+            touches_north_pole = True
 
         if span > 0.5:
             # Draw both shifted variants to cover across the seam.
@@ -377,8 +392,28 @@ def create_solid_mask_equirect(
             pts = [uv_to_xy(u0, v0), uv_to_xy(u1, v1), uv_to_xy(u2, v2)]
             draw.polygon(pts, fill=255)
 
-    # Convert to float32 normalized
+    # Convert to numpy array
     out = np.asarray(mask_img, dtype=np.float32) / 255.0
+
+    # Fix pole singularities: if triangles touch a pole, fill the entire pole row
+    # This handles the UV sphere singularity where all triangles meet at a point
+    # but leave gaps when rasterized.
+    pole_fill_rows = max(2, h // 256)  # Fill a few rows at the pole
+    
+    if touches_north_pole:
+        # North pole is at v=1, which is y=0 in image coords (top of image)
+        # Fill the top row(s) if there's any coverage nearby
+        for row in range(pole_fill_rows):
+            if row < h and np.any(out[row:row + pole_fill_rows * 2, :] > 0.5):
+                out[row, :] = 1.0
+    
+    if touches_south_pole:
+        # South pole is at v=0, which is y=h-1 in image coords (bottom of image)
+        # Fill the bottom row(s) if there's any coverage nearby
+        for row in range(h - pole_fill_rows, h):
+            if row >= 0 and np.any(out[row - pole_fill_rows * 2:row + 1, :] > 0.5):
+                out[row, :] = 1.0
+
     return out
 
 
