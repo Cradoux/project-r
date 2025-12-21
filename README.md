@@ -108,6 +108,17 @@ In the Project-R panel, enter a descriptive name in **Section Name** (e.g., "nor
 - **Square Crop**: Enable if your processing tool requires square images (e.g., Gaea)
 - **Feather (px)**: Edge feather size for blending (default 64px works well)
 
+### Step 2b: Heightmap Tracking (Optional)
+If you have a heightmap in your `source/` folder:
+- **Heightmap File**: Enter the filename (e.g., `heightmap.png`)
+- **Max Elevation (m)**: The elevation represented by pure white (default: 8849m = Mount Everest)
+
+When set, the addon will:
+1. Find the brightest pixel in each section's heightmap (within the masked area)
+2. Calculate the maximum elevation for that region
+3. Include Gaea-compatible height suggestions in `section_info.txt`
+4. Optionally normalize heights during reassembly
+
 ### Step 3: Create the Section
 Click **Create Section from Selected Faces**
 
@@ -140,9 +151,17 @@ Resolution: 0.85 km/pixel
 Type: Hammer (oblique)
 Center: 45.20° lon, 32.10° lat
 
+=== Elevation ===
+Heightmap: heightmap.png
+Max Brightness in Section: 0.72 (72%)
+Max Elevation: 6371 m
+
 === For Gaea ===
-Set Map Size to approximately 1400 km
+Map Size: 1400 km
+Suggested Height: 6371 m
 ```
+
+If your section exceeds Gaea's 2400 km limit, the suggested height is automatically scaled to maintain correct proportions.
 
 ### Section Size Information
 When you create a section, the addon reports the physical size:
@@ -201,6 +220,7 @@ Click **Validate** to check that all sections have processed files.
 
 ### Step 2: Configure Reassembly Options
 - **Extend Edge Colors**: Enable to fill empty ocean areas by extending from section edges (recommended)
+- **Normalize Heights**: Scale heightmaps so each section's max brightness matches its calculated elevation (recommended for consistent terrain)
 
 ### Step 3: Reassemble
 Click **Reassemble**

@@ -285,6 +285,7 @@ def _write_section_info_txt(
     full_canvas_size: Tuple[int, int],
     square_crop: bool,
     feather_px: int,
+    elevation_info: dict | None = None,
 ) -> None:
     """Write a human-readable section_info.txt file."""
     info_path = section_dir / "section_info.txt"
@@ -309,11 +310,59 @@ def _write_section_info_txt(
         f"Full Canvas: {full_canvas_size[0]} x {full_canvas_size[1]}",
         f"Square Crop: {'Yes' if square_crop else 'No'}",
         f"Feather: {feather_px} px",
+    ]
+    
+    # Add elevation info if available
+    if elevation_info is not None:
+        max_brightness = elevation_info.get("section_max_brightness", 0)
+        section_elev = elevation_info.get("section_max_elevation_m", 0)
+        heightmap_file = elevation_info.get("heightmap_file", "")
+        
+        lines.extend([
+            "",
+            "=== Elevation ===",
+            f"Heightmap: {heightmap_file}",
+            f"Max Brightness in Section: {max_brightness:.2f} ({max_brightness*100:.0f}%)",
+            f"Max Elevation: {section_elev:.0f} m",
+        ])
+    
+    # Calculate Gaea suggestions
+    max_extent_km = max(extent_km)
+    gaea_max_scale_km = 2400.0
+    
+    lines.extend([
         "",
         "=== For Gaea ===",
-        f"Set Map Size to approximately {max(extent_km):.0f} km",
-        f"or use exact values: {extent_km[0]:.1f} x {extent_km[1]:.1f} km",
-    ]
+    ])
+    
+    if max_extent_km <= gaea_max_scale_km:
+        lines.append(f"Map Size: {max_extent_km:.0f} km")
+        if elevation_info is not None:
+            section_elev = elevation_info.get("section_max_elevation_m", 0)
+            lines.append(f"Suggested Height: {section_elev:.0f} m")
+        else:
+            lines.append(f"(Set height based on your heightmap's max elevation)")
+    else:
+        # Section exceeds Gaea's limit - need to scale down
+        scale_factor = gaea_max_scale_km / max_extent_km
+        lines.append(f"Map Size: {max_extent_km:.0f} km (exceeds Gaea's {gaea_max_scale_km:.0f} km limit)")
+        lines.append(f"Use Gaea Map Size: {gaea_max_scale_km:.0f} km")
+        
+        if elevation_info is not None:
+            section_elev = elevation_info.get("section_max_elevation_m", 0)
+            scaled_height = section_elev * scale_factor
+            lines.extend([
+                f"Suggested Height: {scaled_height:.0f} m (scaled from {section_elev:.0f} m)",
+                "",
+                f"Calculation: {section_elev:.0f} m × ({gaea_max_scale_km:.0f} / {max_extent_km:.0f}) = {scaled_height:.0f} m",
+                "This maintains the correct height-to-width ratio in Gaea.",
+            ])
+        else:
+            lines.extend([
+                "",
+                f"Scale your height by {scale_factor:.2f}x to maintain proportions.",
+                f"Example: 8849 m × {scale_factor:.2f} = {8849 * scale_factor:.0f} m",
+            ])
     
     info_path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -646,51 +695,104 @@ class PP_OT_create_section(bpy.types.Operator):
         )
         imaging.save_image(effective_buf, effective_path, "PNG", color_depth="16")
 
+        # ---- Heightmap Elevation Tracking ----
+        elevation_info: dict | None = None
+        heightmap_filename = s.heightmap_filename.strip()
+        if heightmap_filename:
+            # Find the heightmap in the crops
+            heightmap_crop_path = root / "sections" / sec_id / "crops" / heightmap_filename
+            if heightmap_crop_path.exists():
+                try:
+                    hm_img = imaging.load_image(heightmap_crop_path)
+                    hm_pixels = hm_img.pixels
+                    if hm_pixels.ndim == 3:
+                        # Use first channel for greyscale
+                        hm_pixels = hm_pixels[:, :, 0]
+                    
+                    # Upscale effective mask to match crop size for masking
+                    mask_for_hm = imaging.resize_double_bilinear(effective_mask[..., None])[:, :, 0]
+                    # Clamp to heightmap size
+                    mask_for_hm = mask_for_hm[:hm_pixels.shape[0], :hm_pixels.shape[1]]
+                    if mask_for_hm.shape[0] < hm_pixels.shape[0] or mask_for_hm.shape[1] < hm_pixels.shape[1]:
+                        padded = np.zeros(hm_pixels.shape, dtype=np.float32)
+                        padded[:mask_for_hm.shape[0], :mask_for_hm.shape[1]] = mask_for_hm
+                        mask_for_hm = padded
+                    
+                    # Find max brightness only where mask > 0.5
+                    valid_pixels = hm_pixels[mask_for_hm > 0.5]
+                    if len(valid_pixels) > 0:
+                        section_max_brightness = float(np.max(valid_pixels))
+                    else:
+                        section_max_brightness = float(np.max(hm_pixels))
+                    
+                    section_max_elevation_m = section_max_brightness * s.max_elevation_m
+                    
+                    elevation_info = {
+                        "heightmap_file": heightmap_filename,
+                        "global_max_elevation_m": s.max_elevation_m,
+                        "section_max_brightness": round(section_max_brightness, 4),
+                        "section_max_elevation_m": round(section_max_elevation_m, 2),
+                    }
+                    print(f"[Project-R] Heightmap: max brightness={section_max_brightness:.2%}, elevation={section_max_elevation_m:.0f}m")
+                except Exception as e:
+                    print(f"[Project-R] Warning: Failed to analyze heightmap: {e}")
+            else:
+                print(f"[Project-R] Warning: Heightmap '{heightmap_filename}' not found in crops")
+
         # Update source_maps in manifest
         manifest.setdefault("global", {})["source_maps"] = [f.name for f in source_maps]
         
-        manifest.setdefault("sections", []).append(
-            {
-                "id": sec_id,
-                "name": s.new_section_name,
-                "created_utc": dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
-                "projection": {
-                    "type": "Hammer",
-                    "center_lon_deg": params.center_lon_deg,
-                    "center_lat_deg": params.center_lat_deg,
-                    "rot_deg": params.rot_deg,
-                },
-                "full_canvas": {
-                    "size": [full_w, full_h],
-                    "path_by_layer": full_paths,
-                },
-                "crop": {
-                    "used_square": bool(s.square_crop),
-                    "rect_xywh": [int(rect.x), int(rect.y), int(rect.w), int(rect.h)],
-                    "paths_by_layer": crop_paths,
-                },
-                "size_info": {
-                    "planet_radius_km": planet_radius_km,
-                    "extent_km": [round(extent_width_km, 2), round(extent_height_km, 2)],
-                    "km_per_pixel": round(km_per_pixel, 4),
-                    "crop_pixels": [rect.w, rect.h],
-                },
-                "processed": {"expected_paths_by_layer": {}},
-                "masks": {
-                    "effective_mask_path": str(effective_rel).replace("\\", "/"),
-                    "resolution_scale": 0.5,
-                },
-                "reassembly": {
-                    "feather_px": int(s.feather_px),
-                },
-                "created_from_selection": {
-                    "mesh_object": context.active_object.name if context.active_object else "",
-                    "selected_face_indices": face_indices,
-                    "selection_uv_sample_count": len(lonlats),
-                },
-                "overlay_color_rgba": overlay_color_rgba,
-            }
-        )
+        # Update global heightmap settings if specified
+        if heightmap_filename:
+            manifest["global"]["heightmap_filename"] = heightmap_filename
+            manifest["global"]["max_elevation_m"] = s.max_elevation_m
+        
+        section_entry = {
+            "id": sec_id,
+            "name": s.new_section_name,
+            "created_utc": dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            "projection": {
+                "type": "Hammer",
+                "center_lon_deg": params.center_lon_deg,
+                "center_lat_deg": params.center_lat_deg,
+                "rot_deg": params.rot_deg,
+            },
+            "full_canvas": {
+                "size": [full_w, full_h],
+                "path_by_layer": full_paths,
+            },
+            "crop": {
+                "used_square": bool(s.square_crop),
+                "rect_xywh": [int(rect.x), int(rect.y), int(rect.w), int(rect.h)],
+                "paths_by_layer": crop_paths,
+            },
+            "size_info": {
+                "planet_radius_km": planet_radius_km,
+                "extent_km": [round(extent_width_km, 2), round(extent_height_km, 2)],
+                "km_per_pixel": round(km_per_pixel, 4),
+                "crop_pixels": [rect.w, rect.h],
+            },
+            "processed": {"expected_paths_by_layer": {}},
+            "masks": {
+                "effective_mask_path": str(effective_rel).replace("\\", "/"),
+                "resolution_scale": 0.5,
+            },
+            "reassembly": {
+                "feather_px": int(s.feather_px),
+            },
+            "created_from_selection": {
+                "mesh_object": context.active_object.name if context.active_object else "",
+                "selected_face_indices": face_indices,
+                "selection_uv_sample_count": len(lonlats),
+            },
+            "overlay_color_rgba": overlay_color_rgba,
+        }
+        
+        # Add elevation info if available
+        if elevation_info is not None:
+            section_entry["elevation_info"] = elevation_info
+        
+        manifest.setdefault("sections", []).append(section_entry)
 
         manifest_lib.write_manifest(mp, manifest)
         
@@ -716,6 +818,7 @@ class PP_OT_create_section(bpy.types.Operator):
             full_canvas_size=(full_w, full_h),
             square_crop=bool(s.square_crop),
             feather_px=int(s.feather_px),
+            elevation_info=elevation_info,
         )
         
         self.report(
