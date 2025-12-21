@@ -18,7 +18,7 @@ This workflow is based on the excellent guide by **Worldbuilding Pasta**: [An Ap
 ## Installation
 
 ### Step 1: Download the Addon
-Download `project_r.zip` from this repository's `blender_addons/` folder.
+Download [`project_r.zip`](project_r.zip) from the root of this repository.
 
 ### Step 2: Install in Blender
 1. Open Blender

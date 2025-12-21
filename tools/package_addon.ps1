@@ -3,7 +3,7 @@ Param(
 )
 
 $addonDir = Join-Path $RepoRoot "blender_addons\project_r"
-$zipPath  = Join-Path $RepoRoot "blender_addons\project_r.zip"
+$zipPath  = Join-Path $RepoRoot "project_r.zip"
 
 if (-Not (Test-Path $addonDir)) {
   Write-Error "Addon folder not found: $addonDir"
