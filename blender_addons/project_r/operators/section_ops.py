@@ -15,8 +15,13 @@ from .. import geo
 from .. import imaging
 from .. import manifest as manifest_lib
 from ..projection_backend import ProjectionParams, project_equirect_to_hammer, project_equirect_array_to_hammer
-from ..vendor.projectionpasta import projectionpasta as pp
 from . import sphere_ops
+
+
+def _get_pp():
+    """Lazy import of projectionpasta to allow addon to load even if PIL is missing."""
+    from ..vendor.projectionpasta import projectionpasta as pp  # type: ignore
+    return pp
 
 
 def _point_in_triangle_2d(
@@ -63,6 +68,7 @@ def _rasterize_coverage_mask(
     
     Returns: (H, W) float32 array with 1.0 where selected, 0.0 elsewhere.
     """
+    pp = _get_pp()  # Lazy import
     full_w, full_h = full_size
     cx, cy, cw, ch = crop_rect.x, crop_rect.y, crop_rect.w, crop_rect.h
 
@@ -376,6 +382,7 @@ def _compute_crop_rect(
     margin_px: int,
     square: bool,
 ) -> geo.RectI:
+    pp = _get_pp()  # Lazy import
     w, h = full_size
     # IMPORTANT: Use projectionpasta's own forward projection for Hammer so
     # crop bounds match exactly what we render in hammer_full.
