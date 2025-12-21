@@ -402,6 +402,40 @@ class PP_OT_set_overlay_opacity(Operator):
         return {"FINISHED"}
 
 
+class PP_OT_select_heightmap(Operator):
+    bl_idname = "pp.select_heightmap"
+    bl_label = "Select Heightmap"
+    bl_description = "Select the heightmap file from source/ folder for elevation tracking"
+
+    filepath: bpy.props.StringProperty(  # type: ignore[valid-type]
+        name="Heightmap",
+        subtype="FILE_PATH",
+        default="",
+    )
+
+    def invoke(self, context: bpy.types.Context, event: bpy.types.Event):
+        # Try to start in the source/ folder
+        s = context.scene.projection_pasta
+        root = s.project_root_path()
+        if root is not None:
+            source_dir = root / "source"
+            if source_dir.exists():
+                self.filepath = str(source_dir) + "\\"
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context: bpy.types.Context):
+        if not self.filepath:
+            self.report({"ERROR"}, "No file selected")
+            return {"CANCELLED"}
+
+        # Store just the filename (not the full path)
+        filename = Path(self.filepath).name
+        context.scene.projection_pasta.heightmap_filename = filename
+        self.report({"INFO"}, f"Heightmap set to: {filename}")
+        return {"FINISHED"}
+
+
 _CLASSES = (
     PP_OT_create_sphere,
     PP_OT_assign_preview_texture,
@@ -409,6 +443,7 @@ _CLASSES = (
     PP_OT_expand_selection,
     PP_OT_shrink_selection,
     PP_OT_set_overlay_opacity,
+    PP_OT_select_heightmap,
 )
 
 
