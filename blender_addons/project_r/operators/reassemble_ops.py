@@ -196,6 +196,28 @@ class PP_OT_reassemble(bpy.types.Operator):
         layers_dir = out_dir / "layers"
         layers_dir.mkdir(parents=True, exist_ok=True)
 
+        # Get heightmap settings for elevation normalization
+        heightmap_filename = manifest.get("global", {}).get("heightmap_filename", "")
+        global_max_elevation_m = float(manifest.get("global", {}).get("max_elevation_m", 0.0))
+        
+        # Build a map of section_id -> section_max_elevation for heightmap normalization
+        section_elevations: Dict[str, float] = {}
+        if heightmap_filename and s.normalize_heightmaps:
+            for sec in sections:
+                sec_id = sec.get("id", "")
+                elev_info = sec.get("elevation_info", {})
+                if elev_info:
+                    section_elevations[sec_id] = float(elev_info.get("section_max_elevation_m", 0.0))
+            
+            if section_elevations:
+                # Find the global max elevation across all sections
+                actual_global_max = max(section_elevations.values())
+                print(f"[Project-R] Heightmap normalization enabled for '{heightmap_filename}'")
+                print(f"[Project-R]   Global max elevation: {actual_global_max:.0f} m")
+                for sec_id, elev in section_elevations.items():
+                    scale = elev / actual_global_max if actual_global_max > 0 else 1.0
+                    print(f"[Project-R]   - {sec_id}: {elev:.0f} m (scale: {scale:.3f})")
+
         warnings: List[str] = []
         layers_saved = 0
 
@@ -287,6 +309,15 @@ class PP_OT_reassemble(bpy.types.Operator):
                 if crop_pixels.ndim == 2:
                     crop_pixels = crop_pixels[..., None]
                 crop_filled = imaging.extend_nearest_valid(crop_pixels, coverage_for_extend)
+
+                # Apply heightmap elevation normalization if this is the heightmap
+                is_heightmap = heightmap_filename and fname == heightmap_filename
+                if is_heightmap and s.normalize_heightmaps and sec_id in section_elevations:
+                    section_elev = section_elevations[sec_id]
+                    actual_global_max = max(section_elevations.values()) if section_elevations else 1.0
+                    if actual_global_max > 0:
+                        elev_scale = section_elev / actual_global_max
+                        crop_filled = crop_filled.astype(np.float32) * elev_scale
 
                 # Apply resolution normalization if needed
                 if abs(scale_factor - 1.0) > 0.001:

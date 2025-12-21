@@ -137,6 +137,27 @@ class ProjectionPastaProjectSettings(PropertyGroup):
         soft_max=100000.0,
     )
 
+    # Heightmap elevation tracking
+    heightmap_filename: StringProperty(  # type: ignore[valid-type]
+        name="Heightmap File",
+        description="Filename in source/ to track as heightmap (e.g., heightmap.png). Leave empty to disable elevation tracking.",
+        default="",
+    )
+
+    max_elevation_m: FloatProperty(  # type: ignore[valid-type]
+        name="Max Elevation (m)",
+        description="Maximum elevation in meters (pure white in heightmap). Default is Mount Everest.",
+        default=8849.0,
+        min=1.0,
+        soft_max=20000.0,
+    )
+
+    normalize_heightmaps: BoolProperty(  # type: ignore[valid-type]
+        name="Normalize Heights",
+        description="Scale heightmaps during reassembly so each section's max matches its calculated elevation",
+        default=True,
+    )
+
     # Paths derived
     def project_root_path(self) -> Optional[Path]:
         p = Path(bpy.path.abspath(self.project_root)).resolve()
