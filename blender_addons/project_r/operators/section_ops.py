@@ -268,6 +268,56 @@ def _gather_uv_centers_for_faces(
     return centers
 
 
+def _write_section_info_txt(
+    *,
+    section_dir: Path,
+    section_name: str,
+    created_utc: str,
+    planet_radius_km: float,
+    extent_km: Tuple[float, float],
+    km_per_pixel: float,
+    projection_type: str,
+    center_lon_deg: float,
+    center_lat_deg: float,
+    rot_deg: float,
+    crop_pixels: Tuple[int, int],
+    crop_position: Tuple[int, int],
+    full_canvas_size: Tuple[int, int],
+    square_crop: bool,
+    feather_px: int,
+) -> None:
+    """Write a human-readable section_info.txt file."""
+    info_path = section_dir / "section_info.txt"
+    
+    lines = [
+        f"Section: {section_name}",
+        f"Created: {created_utc}",
+        "",
+        "=== Physical Size ===",
+        f"Planet Radius: {planet_radius_km:.0f} km",
+        f"Extent: {extent_km[0]:.1f} x {extent_km[1]:.1f} km",
+        f"Resolution: {km_per_pixel:.2f} km/pixel",
+        "",
+        "=== Projection ===",
+        f"Type: {projection_type}",
+        f"Center: {center_lon_deg:.2f}° lon, {center_lat_deg:.2f}° lat",
+        f"Rotation: {rot_deg:.1f}°",
+        "",
+        "=== Crop ===",
+        f"Pixels: {crop_pixels[0]} x {crop_pixels[1]}",
+        f"Position: ({crop_position[0]}, {crop_position[1]}) in full canvas",
+        f"Full Canvas: {full_canvas_size[0]} x {full_canvas_size[1]}",
+        f"Square Crop: {'Yes' if square_crop else 'No'}",
+        f"Feather: {feather_px} px",
+        "",
+        "=== For Gaea ===",
+        f"Set Map Size to approximately {max(extent_km):.0f} km",
+        f"or use exact values: {extent_km[0]:.1f} x {extent_km[1]:.1f} km",
+    ]
+    
+    info_path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def _compute_crop_rect(
     *,
     lonlats: List[geo.LonLat],
@@ -647,6 +697,26 @@ class PP_OT_create_section(bpy.types.Operator):
         # Also update planet_radius_km in global settings
         manifest["global"]["planet_radius_km"] = planet_radius_km
         manifest_lib.write_manifest(mp, manifest)
+        
+        # Write human-readable section_info.txt
+        created_utc = dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        _write_section_info_txt(
+            section_dir=root / "sections" / sec_id,
+            section_name=s.new_section_name,
+            created_utc=created_utc,
+            planet_radius_km=planet_radius_km,
+            extent_km=(extent_width_km, extent_height_km),
+            km_per_pixel=km_per_pixel,
+            projection_type="Hammer (oblique)",
+            center_lon_deg=params.center_lon_deg,
+            center_lat_deg=params.center_lat_deg,
+            rot_deg=params.rot_deg,
+            crop_pixels=(rect.w, rect.h),
+            crop_position=(rect.x, rect.y),
+            full_canvas_size=(full_w, full_h),
+            square_crop=bool(s.square_crop),
+            feather_px=int(s.feather_px),
+        )
         
         self.report(
             {"INFO"},

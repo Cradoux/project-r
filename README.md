@@ -121,7 +121,27 @@ project/
 │       │   ├── heightmap.exr       ← Cropped height map
 │       │   └── biome_mask.png      ← Cropped biome mask
 │       ├── colour_map__hammer_full.png
-│       └── effective_mask__crop.png  ← Blend mask for this section
+│       ├── effective_mask__crop.png  ← Blend mask for this section
+│       └── section_info.txt          ← Human-readable size/projection info
+```
+
+### Section Info File
+Each section includes a `section_info.txt` with easy-to-read metadata:
+```
+Section: Northern Continent
+Created: 2025-12-21T14:30:00Z
+
+=== Physical Size ===
+Planet Radius: 6371 km
+Extent: 1200.5 x 1400.2 km
+Resolution: 0.85 km/pixel
+
+=== Projection ===
+Type: Hammer (oblique)
+Center: 45.20° lon, 32.10° lat
+
+=== For Gaea ===
+Set Map Size to approximately 1400 km
 ```
 
 ### Section Size Information
@@ -198,12 +218,24 @@ Reassembled maps appear in:
 ```
 project/
 ├── reassembled/
-│   ├── colour_map.png
+│   ├── colour_map.png              ← Blended global map
 │   ├── heightmap.exr
-│   └── gaea_erosion.png
+│   ├── gaea_erosion.png
+│   └── layers/                     ← Individual section layers
+│       └── colour_map/
+│           ├── sec_001_africa.png      ← Full-size, transparent background
+│           ├── sec_002_europe.png
+│           └── sec_003_asia.png
 ```
 
-Each file combines all sections that had a matching filename.
+Each blended file combines all sections that had a matching filename.
+
+### Layer Outputs for Photoshop
+The `layers/` subfolder contains each section as a **separate full-size equirectangular image** with transparency:
+- Each section is reprojected to its correct position on the globe
+- Areas outside the section are fully transparent (alpha = 0)
+- Import all layers into Photoshop for manual blending and custom backgrounds
+- Useful for fine-tuning seams or adding hand-painted details
 
 ---
 
@@ -235,7 +267,8 @@ project/
 ├── sections/               ← Generated section crops
 │   ├── sec_001_name/
 │   │   ├── crops/          ← Cropped maps for processing
-│   │   └── effective_mask__crop.png
+│   │   ├── effective_mask__crop.png
+│   │   └── section_info.txt  ← Human-readable size info
 │   └── sec_002_name/
 │       └── ...
 ├── processed/              ← Your processed outputs (you create these)
@@ -244,7 +277,11 @@ project/
 │   └── sec_002_name/
 │       └── colour_map.png
 └── reassembled/            ← Final combined outputs
-    └── colour_map.png
+    ├── colour_map.png        ← Blended result
+    └── layers/               ← Individual layers for Photoshop
+        └── colour_map/
+            ├── sec_001_name.png
+            └── sec_002_name.png
 ```
 
 ---

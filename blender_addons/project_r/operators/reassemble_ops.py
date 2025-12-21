@@ -193,13 +193,21 @@ class PP_OT_reassemble(bpy.types.Operator):
 
         out_dir = root / "reassembled"
         out_dir.mkdir(parents=True, exist_ok=True)
+        layers_dir = out_dir / "layers"
+        layers_dir.mkdir(parents=True, exist_ok=True)
 
         warnings: List[str] = []
+        layers_saved = 0
 
         for fname, entries in groups.items():
             is_mask = _is_mask_name(fname)
             interp = _interp_for_name(fname)
             treat_as_color = _treat_as_color_name(fname)
+            
+            # Create layers subdirectory for this filename
+            fname_stem = Path(fname).stem
+            fname_layers_dir = layers_dir / fname_stem
+            fname_layers_dir.mkdir(parents=True, exist_ok=True)
 
             # Initialize accumulators
             base_layer: np.ndarray | None = None
@@ -342,6 +350,37 @@ class PP_OT_reassemble(bpy.types.Operator):
                 if mask_eq.ndim == 2:
                     mask_eq = mask_eq[..., None]
 
+                # Save individual section layer with transparency
+                # Combine RGB(A) with mask as alpha for Photoshop layering
+                layer_eq = img_eq.astype(np.float32)
+                if layer_eq.shape[2] == 3:
+                    # Add alpha channel from mask
+                    layer_with_alpha = np.concatenate([layer_eq, mask_eq], axis=2)
+                elif layer_eq.shape[2] == 4:
+                    # Multiply existing alpha with mask
+                    layer_with_alpha = layer_eq.copy()
+                    layer_with_alpha[:, :, 3:4] *= mask_eq
+                elif layer_eq.shape[2] == 1:
+                    # Grayscale: convert to RGBA
+                    layer_with_alpha = np.concatenate([
+                        layer_eq, layer_eq, layer_eq, mask_eq
+                    ], axis=2)
+                else:
+                    # Fallback: just append mask
+                    layer_with_alpha = np.concatenate([layer_eq, mask_eq], axis=2)
+                
+                layer_path = fname_layers_dir / f"{sec_id}.png"
+                layer_buf = imaging.ImageBuffer(
+                    width=gw,
+                    height=gh,
+                    channels=layer_with_alpha.shape[2],
+                    pixels=layer_with_alpha,
+                )
+                # Save as PNG with alpha (16-bit for non-color, 8-bit for color)
+                layer_depth = "8" if treat_as_color else "16"
+                imaging.save_image(layer_buf, layer_path, "PNG", color_depth=layer_depth)
+                layers_saved += 1
+
                 # Initialize base layer if needed
                 if base_layer is None:
                     base_layer = np.zeros((gh, gw, img_eq.shape[2]), dtype=np.float32)
@@ -400,7 +439,7 @@ class PP_OT_reassemble(bpy.types.Operator):
                 print(f"[Project-R] Warning: {w}")
             self.report({"WARNING"}, f"Reassembled with {len(warnings)} warning(s) (see console)")
         else:
-            self.report({"INFO"}, f"Reassembled {len(groups)} file(s) to {out_dir}")
+            self.report({"INFO"}, f"Reassembled {len(groups)} file(s) + {layers_saved} layer(s) to {out_dir}")
 
         return {"FINISHED"}
 
