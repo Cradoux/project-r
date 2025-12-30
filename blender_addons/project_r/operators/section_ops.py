@@ -469,6 +469,17 @@ def _write_section_info_txt(
     # === For Wilbur === section
     extent_width_km = extent_km[0]
     crop_width_px = crop_pixels[0]
+    
+    # Guard against division by zero
+    if extent_width_km <= 0 or crop_width_px <= 0:
+        lines.extend([
+            "",
+            "=== For Wilbur ===",
+            "(Wilbur guidance unavailable - invalid extent or crop size)",
+        ])
+        info_path.write_text("\n".join(lines), encoding="utf-8")
+        return
+    
     km_per_px = extent_width_km / crop_width_px
     px_per_km = crop_width_px / extent_width_km
     
