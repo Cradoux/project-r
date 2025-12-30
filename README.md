@@ -153,15 +153,47 @@ Center: 45.20° lon, 32.10° lat
 
 === Elevation ===
 Heightmap: heightmap.png
-Max Brightness in Section: 0.72 (72%)
-Max Elevation: 6371 m
+Brightness Range: 0.00-0.72 (0%-72%)
+Elevation Range: 0-6371 m
 
 === For Gaea ===
 Map Size: 1400 km
 Suggested Height: 6371 m
+
+=== For Wilbur ===
+Preset: REGIONAL (extent 1200.5 km)
+Scale: 0.85 km/px | 1.18 px/km
+
+--- Height Mapping (Span 500-3500) ---
+Note: Wilbur 'Span' is NOT metres. Use this affine mapping for consistency.
+To convert metres -> Wilbur units: h_w = h_m * 0.471204 + 500
+To convert Wilbur -> metres: h_m = (h_w - 500) / 0.471204
+(Fallback assumes sea level ~0; relative shapes remain correct)
+
+--- Recipe (do in order) ---
+
+(1) Fill Basins
+    Filter -> Fill -> Fill Basins
+
+(2) Incise Flow (drainage topology)
+    Filter -> Erosion -> Incise Flow...
+    Amount: 0.5
+    Flow Exponent: 0.4
+    Pre Blur (sigma): 6
+    [full recipe continues in actual file...]
+
+--- Upscaled Suggestions (same km extent) ---
+4096: 0.29 km/px | 3.41 px/km | Incise PreBlur: 17 | Major PreBlur: 7
+8192: 0.15 km/px | 6.83 px/km | Incise PreBlur: 34 | Major PreBlur: 14
 ```
 
 If your section exceeds Gaea's 2400 km limit, the suggested height is automatically scaled to maintain correct proportions.
+
+**Wilbur Presets:** The addon automatically selects an erosion preset based on your region's physical size:
+- **LOCAL** (<500 km): Fine valleys/streams, avoid over-smoothing
+- **REGIONAL** (500-1500 km): Coherent basins + broad valleys
+- **CONTINENTAL** (1500-4000 km): Drainage topology + wide valleys
+- **SUPERCONTINENTAL** (≥4000 km): Major basins only, avoid "global mush"
 
 ### Section Size Information
 When you create a section, the addon reports the physical size:

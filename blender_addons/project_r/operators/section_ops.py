@@ -274,6 +274,100 @@ def _gather_uv_centers_for_faces(
     return centers
 
 
+# ---------------------------------------------------------------------------
+# Wilbur Guidance Helpers
+# ---------------------------------------------------------------------------
+
+def _clamp_int(x: float, lo: int, hi: int) -> int:
+    """Clamp and round a float to an integer within [lo, hi]."""
+    return max(lo, min(hi, round(x)))
+
+
+def _pick_wilbur_preset(extent_km: float) -> dict:
+    """
+    Select Wilbur erosion preset based on tile width in km.
+    
+    Returns a dict with:
+      - name: preset name
+      - target_smoothing_km: Incise Flow pre-blur target in km
+      - target_major_km: Major river reinforcement pre-blur target in km
+      - incise_amount: Incise Flow Amount parameter
+      - incise_exponent: Incise Flow Exponent parameter
+      - precip_delta: Precipitation erosion delta
+      - precip_iters_low: Minimum recommended iterations
+      - precip_iters_high: Maximum recommended iterations
+    """
+    if extent_km < 500:
+        return {
+            "name": "LOCAL",
+            "target_smoothing_km": 2.0,
+            "target_major_km": 0.8,
+            "incise_amount": 0.35,
+            "incise_exponent": 0.45,
+            "precip_delta": 0.03,
+            "precip_iters_low": 35,
+            "precip_iters_high": 55,
+        }
+    elif extent_km < 1500:
+        return {
+            "name": "REGIONAL",
+            "target_smoothing_km": 5.0,
+            "target_major_km": 2.0,
+            "incise_amount": 0.5,
+            "incise_exponent": 0.4,
+            "precip_delta": 0.02,
+            "precip_iters_low": 30,
+            "precip_iters_high": 45,
+        }
+    elif extent_km < 4000:
+        return {
+            "name": "CONTINENTAL",
+            "target_smoothing_km": 10.0,
+            "target_major_km": 3.5,
+            "incise_amount": 0.6,
+            "incise_exponent": 0.4,
+            "precip_delta": 0.02,
+            "precip_iters_low": 30,
+            "precip_iters_high": 40,
+        }
+    else:
+        return {
+            "name": "SUPERCONTINENTAL",
+            "target_smoothing_km": 20.0,
+            "target_major_km": 6.0,
+            "incise_amount": 0.7,
+            "incise_exponent": 0.35,
+            "precip_delta": 0.015,
+            "precip_iters_low": 20,
+            "precip_iters_high": 35,
+        }
+
+
+def _compute_affine_mapping(
+    max_elev_m: float,
+    min_elev_m: float = 0.0,
+    wilbur_min: float = 500.0,
+    wilbur_max: float = 3500.0,
+) -> Tuple[float, float]:
+    """
+    Compute affine mapping from metres to Wilbur units.
+    
+    Returns (scale, offset) such that:
+      h_wilbur = h_metres * scale + offset
+      h_metres = (h_wilbur - offset) / scale
+    
+    If max_elev_m <= min_elev_m, returns identity-like (1.0, wilbur_min).
+    """
+    elev_range = max_elev_m - min_elev_m
+    if elev_range <= 0:
+        # Fallback: no valid range, use identity-like mapping
+        return (1.0, wilbur_min)
+    
+    scale = (wilbur_max - wilbur_min) / elev_range
+    offset = wilbur_min - min_elev_m * scale
+    return (scale, offset)
+
+
 def _write_section_info_txt(
     *,
     section_dir: Path,
@@ -321,15 +415,17 @@ def _write_section_info_txt(
     # Add elevation info if available
     if elevation_info is not None:
         max_brightness = elevation_info.get("section_max_brightness", 0)
-        section_elev = elevation_info.get("section_max_elevation_m", 0)
+        min_brightness = elevation_info.get("section_min_brightness", 0)
+        section_max_elev = elevation_info.get("section_max_elevation_m", 0)
+        section_min_elev = elevation_info.get("section_min_elevation_m", 0)
         heightmap_file = elevation_info.get("heightmap_file", "")
         
         lines.extend([
             "",
             "=== Elevation ===",
             f"Heightmap: {heightmap_file}",
-            f"Max Brightness in Section: {max_brightness:.2f} ({max_brightness*100:.0f}%)",
-            f"Max Elevation: {section_elev:.0f} m",
+            f"Brightness Range: {min_brightness:.2f}-{max_brightness:.2f} ({min_brightness*100:.0f}%-{max_brightness*100:.0f}%)",
+            f"Elevation Range: {section_min_elev:.0f}-{section_max_elev:.0f} m",
         ])
     
     # Calculate Gaea suggestions
@@ -369,6 +465,103 @@ def _write_section_info_txt(
                 f"Scale your height by {scale_factor:.2f}x to maintain proportions.",
                 f"Example: 8849 m × {scale_factor:.2f} = {8849 * scale_factor:.0f} m",
             ])
+    
+    # === For Wilbur === section
+    extent_width_km = extent_km[0]
+    crop_width_px = crop_pixels[0]
+    km_per_px = extent_width_km / crop_width_px
+    px_per_km = crop_width_px / extent_width_km
+    
+    # Pick preset based on extent
+    preset = _pick_wilbur_preset(extent_width_km)
+    pre_blur_px = _clamp_int(preset["target_smoothing_km"] * px_per_km, 2, 96)
+    pre_blur_major_px = _clamp_int(preset["target_major_km"] * px_per_km, 2, 64)
+    
+    # Affine mapping for height conversion
+    max_elev_m = elevation_info.get("section_max_elevation_m", 0) if elevation_info else 0
+    min_elev_m = elevation_info.get("section_min_elevation_m", 0) if elevation_info else 0
+    wilbur_min, wilbur_max = 500.0, 3500.0
+    
+    # Use actual min if available and non-zero, otherwise assume sea level
+    use_fallback = (min_elev_m == 0 and max_elev_m > 0)
+    scale, offset = _compute_affine_mapping(max_elev_m, min_elev_m, wilbur_min, wilbur_max)
+    
+    lines.extend([
+        "",
+        "=== For Wilbur ===",
+        f"Preset: {preset['name']} (extent {extent_width_km:.1f} km)",
+        f"Scale: {km_per_px:.2f} km/px | {px_per_km:.2f} px/km",
+        "",
+        f"--- Height Mapping (Span {wilbur_min:.0f}-{wilbur_max:.0f}) ---",
+        "Note: Wilbur 'Span' is NOT metres. Use this affine mapping for consistency.",
+        f"To convert metres -> Wilbur units: h_w = h_m * {scale:.6g} + {offset:.6g}",
+        f"To convert Wilbur -> metres: h_m = (h_w - {offset:.6g}) / {scale:.6g}",
+    ])
+    if use_fallback:
+        lines.append("(Fallback assumes sea level ~0; relative shapes remain correct)")
+    
+    lines.extend([
+        "",
+        "--- Recipe (do in order) ---",
+        "",
+        "(1) Fill Basins",
+        "    Filter -> Fill -> Fill Basins",
+        "",
+        "(2) Incise Flow (drainage topology)",
+        "    Filter -> Erosion -> Incise Flow...",
+        f"    Amount: {preset['incise_amount']}",
+        f"    Flow Exponent: {preset['incise_exponent']}",
+        "    Effect Blend: 1",
+        f"    Pre Blur (sigma): {pre_blur_px}",
+        "    Variable Blur: 0",
+        "    Post Blur: 0",
+        "    Run ONCE.",
+        "",
+        "(3) Precipitation-Based erosion (broad valleys)",
+        "    Filter -> Erosion -> Precipitation-Based... (Ctrl+E)",
+        f"    Delta: {preset['precip_delta']}",
+        "    Max Length: -1",
+        "    Connectivity: 8 way",
+        "    Wrap: None",
+        "    Use Only Selection: OFF (IMPORTANT)",
+        "    Sea: Ignore",
+        "    Hardness: 0.5",
+        "    Passes: 1",
+        "    Blend: None",
+        "    Noise: None",
+        f"    Iterations: {preset['precip_iters_low']}-{preset['precip_iters_high']}",
+        "",
+        "(4) Fill Basins again",
+        "    Filter -> Fill -> Fill Basins",
+        "",
+        "(5) Optional floodplain micro-relief (if basins too flat)",
+        "    Filter -> Noise -> Absolute Magnitude Noise...",
+        "    Magnitude: 1.5 (range 1.0-2.0), Additive: ON",
+        "    Then: Fill Basins",
+        "    Optional soften: Precip Delta 0.005-0.01, Iters 10-15",
+        "",
+        "(6) Optional major-river reinforcement",
+        "    Filter -> Erosion -> Incise Flow...",
+        "    Amount: 0.3",
+        "    Flow Exponent: 0.6",
+        f"    Pre Blur (sigma): {pre_blur_major_px}",
+        "    Effect Blend: 1",
+        "    Variable Blur: 0",
+        "    Post Blur: 0",
+    ])
+    
+    # Upscaled suggestions
+    upscaled_lines = ["", "--- Upscaled Suggestions (same km extent) ---"]
+    for res in [4096, 8192]:
+        km_per_px_up = extent_width_km / res
+        px_per_km_up = res / extent_width_km
+        pre_blur_up = _clamp_int(preset["target_smoothing_km"] * px_per_km_up, 2, 96)
+        pre_blur_major_up = _clamp_int(preset["target_major_km"] * px_per_km_up, 2, 64)
+        upscaled_lines.append(
+            f"{res}: {km_per_px_up:.2f} km/px | {px_per_km_up:.2f} px/km | "
+            f"Incise PreBlur: {pre_blur_up} | Major PreBlur: {pre_blur_major_up}"
+        )
+    lines.extend(upscaled_lines)
     
     info_path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -725,22 +918,27 @@ class PP_OT_create_section(bpy.types.Operator):
                         padded[:mask_for_hm.shape[0], :mask_for_hm.shape[1]] = mask_for_hm
                         mask_for_hm = padded
                     
-                    # Find max brightness only where mask > 0.5
+                    # Find min/max brightness only where mask > 0.5
                     valid_pixels = hm_pixels[mask_for_hm > 0.5]
                     if len(valid_pixels) > 0:
                         section_max_brightness = float(np.max(valid_pixels))
+                        section_min_brightness = float(np.min(valid_pixels))
                     else:
                         section_max_brightness = float(np.max(hm_pixels))
+                        section_min_brightness = float(np.min(hm_pixels))
                     
                     section_max_elevation_m = section_max_brightness * s.max_elevation_m
+                    section_min_elevation_m = section_min_brightness * s.max_elevation_m
                     
                     elevation_info = {
                         "heightmap_file": heightmap_filename,
                         "global_max_elevation_m": s.max_elevation_m,
                         "section_max_brightness": round(section_max_brightness, 4),
                         "section_max_elevation_m": round(section_max_elevation_m, 2),
+                        "section_min_brightness": round(section_min_brightness, 4),
+                        "section_min_elevation_m": round(section_min_elevation_m, 2),
                     }
-                    print(f"[Project-R] Heightmap: max brightness={section_max_brightness:.2%}, elevation={section_max_elevation_m:.0f}m")
+                    print(f"[Project-R] Heightmap: brightness={section_min_brightness:.2%}-{section_max_brightness:.2%}, elevation={section_min_elevation_m:.0f}-{section_max_elevation_m:.0f}m")
                 except Exception as e:
                     print(f"[Project-R] Warning: Failed to analyze heightmap: {e}")
             else:
