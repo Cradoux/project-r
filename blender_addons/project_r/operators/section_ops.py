@@ -657,7 +657,17 @@ class PP_OT_create_section(bpy.types.Operator):
                     selected_triangles_uv = _gather_uv_triangles_for_faces(bm, seed_faces, uv_layer)
         except Exception:
             selected_triangles_uv = []
-        center = geo.mean_center_lonlat(lonlats)
+        
+        # Compute center: use override if enabled, otherwise auto-compute from selection
+        if s.override_projection_center:
+            center = geo.LonLat(
+                lon=math.radians(s.override_center_lon),
+                lat=math.radians(s.override_center_lat)
+            )
+            print(f"[Project-R] Using override center: {s.override_center_lon:.2f}° lon, {s.override_center_lat:.2f}° lat")
+        else:
+            center = geo.mean_center_lonlat(lonlats)
+        
         params = ProjectionParams(
             center_lon_deg=math.degrees(center.lon),
             center_lat_deg=math.degrees(center.lat),

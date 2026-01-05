@@ -56,6 +56,21 @@ class PP_PT_main(Panel):
         box.prop(s, "new_section_name")
         box.prop(s, "square_crop")
         box.prop(s, "feather_px")
+        
+        # Advanced options (collapsed by default)
+        adv_box = box.box()
+        adv_row = adv_box.row()
+        adv_row.prop(
+            s, "override_projection_center",
+            icon="TRIA_DOWN" if s.override_projection_center else "TRIA_RIGHT",
+            text="Advanced Options",
+            emboss=False
+        )
+        if s.override_projection_center:
+            col = adv_box.column(align=True)
+            col.prop(s, "override_center_lon")
+            col.prop(s, "override_center_lat")
+        
         box.operator("pp.create_section", text="Create Section from Selected Faces")
 
         box = layout.box()

@@ -113,6 +113,29 @@ class ProjectionPastaProjectSettings(PropertyGroup):
         default="NewSection",
     )
 
+    # Advanced: Projection center override
+    override_projection_center: BoolProperty(  # type: ignore[valid-type]
+        name="Override Center",
+        description="Manually specify the Hammer projection center instead of auto-computing from selection",
+        default=False,
+    )
+
+    override_center_lon: FloatProperty(  # type: ignore[valid-type]
+        name="Longitude",
+        description="Override projection center longitude in degrees (-180 to 180)",
+        default=0.0,
+        min=-180.0,
+        max=180.0,
+    )
+
+    override_center_lat: FloatProperty(  # type: ignore[valid-type]
+        name="Latitude",
+        description="Override projection center latitude in degrees (-90 to 90)",
+        default=0.0,
+        min=-90.0,
+        max=90.0,
+    )
+
     # Selection expansion rings
     expand_selection_rings: IntProperty(  # type: ignore[valid-type]
         name="Expand Rings",
