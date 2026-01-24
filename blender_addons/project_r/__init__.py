@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import subprocess
 import sys
+import site
 
 import bpy
 from bpy.types import Operator
@@ -20,6 +21,7 @@ bl_info = {
 
 def is_scipy_available() -> bool:
     try:
+        ensure_user_site_on_path()
         import scipy.ndimage
         return True
     except ImportError:
@@ -28,12 +30,24 @@ def is_scipy_available() -> bool:
 
 def is_pillow_available() -> bool:
     try:
+        ensure_user_site_on_path()
         from PIL import Image
         # Verify the C extension actually works (this is what fails for the user)
         Image.new("RGB", (1, 1))
         return True
     except Exception:
         return False
+
+
+def ensure_user_site_on_path() -> None:
+    try:
+        user_site = site.getusersitepackages()
+    except Exception:
+        return
+
+    if user_site and user_site not in sys.path:
+        # Blender installs in Program Files often need user-site packages.
+        sys.path.append(user_site)
 
 
 class PP_OT_install_dependencies(Operator):
@@ -43,6 +57,7 @@ class PP_OT_install_dependencies(Operator):
 
     def execute(self, context):
         python = sys.executable
+        ensure_user_site_on_path()
         try:
             # Ensure pip is available
             subprocess.check_call([python, "-m", "ensurepip", "--upgrade"])
@@ -55,7 +70,7 @@ class PP_OT_install_dependencies(Operator):
         try:
             subprocess.check_call([
                 python, "-m", "pip", "install",
-                "--upgrade", "--force-reinstall", "Pillow"
+                "--user", "--upgrade", "--force-reinstall", "Pillow"
             ])
         except subprocess.CalledProcessError as e:
             errors.append(f"Pillow: {e}")
@@ -64,7 +79,9 @@ class PP_OT_install_dependencies(Operator):
 
         # Install scipy
         try:
-            subprocess.check_call([python, "-m", "pip", "install", "--upgrade", "scipy"])
+            subprocess.check_call([
+                python, "-m", "pip", "install", "--user", "--upgrade", "scipy"
+            ])
         except subprocess.CalledProcessError as e:
             errors.append(f"scipy: {e}")
         except Exception as e:
@@ -74,7 +91,10 @@ class PP_OT_install_dependencies(Operator):
             self.report({"ERROR"}, f"Failed to install: {'; '.join(errors)}")
             return {"CANCELLED"}
 
-        self.report({"INFO"}, "Dependencies installed successfully! Please restart Blender.")
+        self.report(
+            {"INFO"},
+            "Dependencies installed (user site). Please restart Blender."
+        )
         return {"FINISHED"}
 
 
