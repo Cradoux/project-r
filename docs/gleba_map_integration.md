@@ -6,7 +6,7 @@
 
 - **The export is a complete, pixel-aligned 4096×2048 equirect stack.** Every map shares the same grid as the heightmap, so any field can be cropped/reprojected through the existing section pipeline with no re-registration. This is the single most important fact: spatial drivers are "free" to add once decoded.
 - **Three maps drop in TODAY with zero or trivial decode:** `TileElevationGreyscaleBathymetry` (16-bit) → **Heightmap + Bathymetry in one file**; `TrueColor` (or `TileElevationColorSmooth*`) → **World Map**; any of the three viridis rainfall maps → **Rainfall** (needs a one-time viridis→scalar decode).
-- **The heightmap question has a clear winner:** prefer `TileElevationGreyscaleBathymetry` (16-bit, 40k levels, carries sub-sea-level depth so it fills both heightmap and bathymetry). Use `TileElevationGreyscaleLand` only when you want a hard-zeroed ocean and a free land mask; `TileElevationGreyscale` is the land+flat-ocean middle option. All three are genuine 16-bit — **never** use the 8-bit colored `TileElevationColorSmooth*` variants for data (display only).
+- **The heightmap question** — ⚠️ **CORRECTED by inspecting the actual pixels** (the original guess below was wrong): `TileElevationGreyscaleBathymetry` clamps **all land to white (65535)** and only varies over the ocean, so it is a *bathymetry* map, **not** a heightmap. Use **`TileElevationGreyscaleLand`** as the heightmap (land relief, ocean hard-zeroed = sea level, which is exactly the `height = brightness × max_elevation_m` encoding Project-R expects). `TileElevationGreyscale` is the full DEM with **sea level at exactly 0.5 (32768)** — usable only if the pipeline offsets sea level. All are genuine 16-bit — **never** use the 8-bit coloured `TileElevationColorSmooth*` for data (display only).
 - **Rainfall: prefer `AverageRainfall`** (annual mean, clean viridis, high confidence) over `January`/`July` (seasonal, bias incision toward one hemisphere). `AverageHumidity` and `RainShadow` are weaker proxies — use only as fallbacks.
 - **The highest-value NEW capability the rich maps unlock is a spatial UPLIFT field U:** `OrogenyStrength` (a near-ready viridis uplift map) plus `CombinedTectonics`/`TectonicPlates`/`Volcanism` let Project-R build persistent mountain belts at geologically correct locations instead of using a flat uplift constant. The second new capability is **spatial erodibility K_sp** from `RockType`/`GeologicProvince`. Both are extension slots not yet wired.
 - **Land/sea masking is over-served:** at least 8 maps yield a clean binary coastline (`ClimateLandVsSea`, `CrustMap`, `DebugIsLand`, `Waterbodies`, `SinksAndSources`, etc.). One explicit mask slot would replace the current heightmap brightness-threshold guesswork.
@@ -25,20 +25,21 @@
 **Recommendation:** `TrueColor` as default. Offer `TileElevationColorSmoothIceAge` as the "relief" alternative. **Use one epoch (ice vs no-ice) consistently across all slots.** Never invert the hypsometric color maps for elevation — use the grayscale sibling.
 
 ### Heightmap (16-bit grayscale → metres) — THE key input
+⚠️ **Encoding verified against the real export** (the workflow's initial guess was wrong):
 | Name | Enc | Decode | Useful | Notes |
 |---|---|---|---|---|
-| **TileElevationGreyscaleBathymetry** | 1ch **16-bit** | v/65535 | high | **RECOMMENDED default.** 40k levels; carries land + ocean-floor depth → fills heightmap AND bathymetry. Sea level ≈ v 28672–32768 (calibrate). |
-| TileElevationGreyscaleLand | 1ch 16-bit | v/65535 | high | Ocean hard-zeroed (77% zeros) → free land/sea mask via v>0. No bathymetry. Use when you want flat-zero ocean + clean shoreline. |
-| TileElevationGreyscale | 1ch 16-bit | v/65535 | high | Land + ocean (ocean above 0, no deep bathymetry). Middle option. |
+| **TileElevationGreyscaleLand** | 1ch 16-bit | v/65535 × max_elev | high | **RECOMMENDED default heightmap.** Land relief, ocean hard-zeroed (77% zeros = sea level), so it drops into Project-R's `height=brightness×max_elev` (sea at 0) directly. Also a free land/sea mask via v>0. This world's land peak = 0.618 → 5470 m at the Everest (8849 m) scale. |
+| TileElevationGreyscale | 1ch 16-bit | v/65535 | med | Full DEM, **sea level = exactly 0.5 (32768)**, ocean floor below. Needs a sea-level offset before Project-R can use it as a heightmap. |
+| ~~TileElevationGreyscaleBathymetry~~ | 1ch 16-bit | — | **NOT a heightmap** | Land is clamped to white (65535); only the ocean varies. It's a bathymetry map (see below), not a land-relief source. |
 
-All three have thin ~1–2 px **black coastline-outline artifacts** that will seed spurious deep incision — median/dilate the shoreline before stream-power. **Physical elevation range is unlabeled** — user sets `max_elevation_m` (already exists, default 8849 m). Choose ONE as the canonical heightmap; the others are situational.
+**Physical elevation range is unlabeled** — Gleba uses Everest by default, so set `max_elevation_m = 8849` (white = max). Wired in PR1/PR3: the Map Inputs auto-detect picks `…Land` for the heightmap slot.
 
-### Bathymetry (depth; white=deepest)
+### Bathymetry (depth) — IMPLEMENTED in PR3
 | Name | Enc | Decode | Useful | Notes |
 |---|---|---|---|---|
-| **TileElevationGreyscaleBathymetry** | 1ch 16-bit | (sea_level_v − v)/sea_level_v for v<sea_level | high | **Same file as heightmap** — extract sub-sea-level range, remap so white=deepest, feed sea-floor pass. One file, two slots. |
+| **TileElevationGreyscaleBathymetry** | 1ch 16-bit | **input_depth = 1 − v/65535** | high | Ocean-depth gradient with land clamped white. Gleba uses 1=shore/land, 0=deepest; Project-R's sea-floor pass wants 1=deepest (`d_in = input_depth × floor_depth_m`), so **invert on load**. Land (→0) is harmless: the pass only rewrites sub-sea cells. Set `ocean_floor_depth_m` for the absolute deepest. |
 
-No dedicated standalone bathymetry export exists; this combined map is the source.
+Wired in PR3: the Bathymetry slot ingests this map, writes the inverted 16-bit `…__bathy.png` to `source/`, sets `seafloor_bathy_filename`, and enables the Sea Floor pass. Pairs with the `…Land` heightmap (flat ocean) so the sea-floor pass carves Gleba's real ocean relief.
 
 ### Rainfall (single-channel runoff weight, optional)
 | Name | Enc | Decode | Useful | Notes |

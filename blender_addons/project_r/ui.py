@@ -109,6 +109,15 @@ class PP_PT_inputs(_PRPanel, Panel):
             cl = r.operator("pp.set_input_map", text="", icon="X")
             cl.slot = "rainfall"; cl.clear = True
 
+        # Bathymetry slot (inverted Gleba depth map -> Sea Floor pass).
+        bm = f"Bathymetry: {es.seafloor_bathy_filename}" if es.seafloor_bathy_filename else "Bathymetry (optional)"
+        r = col.row(align=True)
+        op = r.operator("pp.set_input_map", text=bm, icon="IMAGE_DATA")
+        op.slot = "bathymetry"; op.clear = False
+        if es.seafloor_bathy_filename:
+            cl = r.operator("pp.set_input_map", text="", icon="X")
+            cl.slot = "bathymetry"; cl.clear = True
+
         # Categorical -> per-class B&W masks (Gaea downstream).
         layout.separator()
         box = layout.box()

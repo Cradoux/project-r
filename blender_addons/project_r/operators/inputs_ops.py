@@ -51,26 +51,32 @@ def _is_effectively_gray(px: np.ndarray) -> bool:
     return float((spread < (2.0 / 255.0)).mean()) > 0.99
 
 
-def _ingest_map(root: Path, src_path: Path, *, decode_colormap: bool) -> str:
-    """Bring a map into ``source/`` and return the filename to record.
+def _ingest_map(root: Path, src_path: Path, *, transform: str = "none") -> str:
+    """Bring a map into ``source/`` and return the filename to record. Idempotent.
 
-    ``decode_colormap`` (for the rainfall/uplift roles): a true colormap RGB image is
-    inverted via the baked viridis LUT to a 16-bit single-channel ``<stem>__decoded.png``;
-    everything else is copied unchanged. Idempotent: re-ingesting overwrites the cache.
+    ``transform``:
+      "none"        copy unchanged.
+      "colormap"    (rainfall): a true colormap RGB image is inverted via the baked
+                    viridis LUT to a 16-bit single channel ``<stem>__decoded.png``.
+      "invert_depth" (bathymetry): a Gleba ocean-depth map (1=shore/land, 0=deepest) is
+                    inverted to the seafloor convention (1=deepest) and written 16-bit
+                    single channel ``<stem>__bathy.png``. Land (1->0) is harmless: the
+                    sea-floor pass only rewrites sub-sea cells.
     """
     source = root / "source"
     source.mkdir(parents=True, exist_ok=True)
     src_path = Path(src_path)
 
-    if decode_colormap:
+    if transform == "colormap":
         buf = imaging.load_image(src_path)
         if buf.channels >= 3 and not _is_effectively_gray(buf.pixels):
             scalar = decode.decode_colormap_to_scalar(buf.pixels)
-            out = source / f"{src_path.stem}__decoded.png"
-            out_buf = imaging.ImageBuffer(width=scalar.shape[1], height=scalar.shape[0],
-                                          channels=1, pixels=scalar[..., None].astype(np.float32))
-            imaging.save_image(out_buf, out, "PNG", color_depth="16")
-            return out.name
+            return _save_single_channel(source, f"{src_path.stem}__decoded.png", scalar)
+    elif transform == "invert_depth":
+        buf = imaging.load_image(src_path)
+        px = buf.pixels[:, :, 0] if buf.pixels.ndim == 3 else buf.pixels
+        depth = (1.0 - np.clip(px.astype(np.float32), 0.0, 1.0))
+        return _save_single_channel(source, f"{src_path.stem}__bathy.png", depth)
 
     dst = source / src_path.name
     try:
@@ -82,6 +88,17 @@ def _ingest_map(root: Path, src_path: Path, *, decode_colormap: bool) -> str:
     return dst.name
 
 
+def _save_single_channel(source: Path, name: str, arr: np.ndarray) -> str:
+    out_buf = imaging.ImageBuffer(width=arr.shape[1], height=arr.shape[0], channels=1,
+                                  pixels=arr[..., None].astype(np.float32))
+    imaging.save_image(out_buf, source / name, "PNG", color_depth="16")
+    return name
+
+
+# Per-slot ingest transform.
+_SLOT_TRANSFORM = {"heightmap": "none", "rainfall": "colormap", "bathymetry": "invert_depth"}
+
+
 # Slot -> (where the filename lives). Only the roles Project-R consumes today are
 # wired; the rest are surfaced by auto-detect as suggestions for a later pass.
 def _set_slot_filename(context, slot: str, filename: str) -> None:
@@ -91,6 +108,12 @@ def _set_slot_filename(context, slot: str, filename: str) -> None:
         s.heightmap_filename = filename
     elif slot == "rainfall":
         es.rainfall_filename = filename
+    elif slot == "bathymetry":
+        es.seafloor_bathy_filename = filename
+        # The bathymetry input only matters with the Sea Floor pass on; enabling it on
+        # load is the obvious intent (clearing the slot leaves the pass as the user set it).
+        if filename:
+            es.enable_seafloor = True
 
 
 class PP_OT_set_input_map(Operator):
@@ -104,6 +127,7 @@ class PP_OT_set_input_map(Operator):
         items=[
             ("heightmap", "Heightmap", "Single-channel elevation (brighter = higher)"),
             ("rainfall", "Rainfall", "Runoff weight (colormap maps are decoded to a scalar)"),
+            ("bathymetry", "Bathymetry", "Ocean depth for the Sea Floor pass (Gleba depth maps are inverted)"),
         ],
         default="heightmap",
         options={"SKIP_SAVE"},
@@ -142,7 +166,8 @@ class PP_OT_set_input_map(Operator):
             self.report({"ERROR"}, "Project Root is not set")
             return {"CANCELLED"}
         try:
-            name = _ingest_map(root, Path(self.filepath), decode_colormap=(self.slot == "rainfall"))
+            name = _ingest_map(root, Path(self.filepath),
+                               transform=_SLOT_TRANSFORM.get(self.slot, "none"))
         except Exception as e:
             self.report({"ERROR"}, f"Failed to load map: {e}")
             return {"CANCELLED"}
@@ -186,14 +211,24 @@ class PP_OT_detect_source_maps(Operator):
         # Rainfall (consumed): decode-on-ingest if it's a colormap map.
         if not (es.rainfall_filename or "").strip() and picks["rainfall"]:
             try:
-                name = _ingest_map(root, src / picks["rainfall"], decode_colormap=True)
+                name = _ingest_map(root, src / picks["rainfall"], transform="colormap")
                 es.rainfall_filename = name
                 filled.append(f"rainfall={name}" + (" (decoded)" if name.endswith("__decoded.png") else ""))
             except Exception as e:
                 notes.append(f"rainfall decode failed: {e}")
 
+        # Bathymetry (consumed by the Sea Floor pass): invert the Gleba depth map on ingest.
+        if not (es.seafloor_bathy_filename or "").strip() and picks["bathymetry"]:
+            try:
+                name = _ingest_map(root, src / picks["bathymetry"], transform="invert_depth")
+                es.seafloor_bathy_filename = name
+                es.enable_seafloor = True
+                filled.append(f"bathymetry={name} (Sea Floor on)")
+            except Exception as e:
+                notes.append(f"bathymetry decode failed: {e}")
+
         # The rest are not consumed yet -- surface them as suggestions.
-        for slot in ("world_map", "bathymetry", "landsea_mask", "uplift", "erodibility"):
+        for slot in ("world_map", "landsea_mask", "uplift", "erodibility"):
             if picks.get(slot):
                 notes.append(f"{slot}: {picks[slot]}")
 

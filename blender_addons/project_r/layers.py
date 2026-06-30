@@ -100,8 +100,11 @@ def classify_source_folder(filenames):
     ``{slot: best_filename or ""}`` for every slot. Pure: takes plain filenames.
 
     Resolution rules (see docs/gleba_map_integration.md):
-      heightmap   prefer *Bathymetry (16-bit, dual-purpose) > *Land > plain greyscale;
-                  colour images are excluded (they match 'elev' but are 8-bit display).
+      heightmap   prefer *Land (ocean hard-zeroed = sea level, the encoding Project-R's
+                  height=brightness*max_elev expects) > plain greyscale; EXCLUDE the
+                  *Bathymetry variant (its land is clamped white -- no land relief) and
+                  colour images (they match 'elev' but are 8-bit display).
+      bathymetry  the *Bathymetry variant (ocean-depth gradient); decoded 1-norm on load.
       rainfall    prefer Average* > January/July; never the RainShadow dryness map.
       world_map   prefer TrueColor > colour hypsometric.
     """
@@ -125,8 +128,8 @@ def classify_source_folder(filenames):
 
     return {
         "heightmap": best(lambda n: is_height_name(n) and not treat_as_color(n),
-                          prefer=("bathymetry", "land", "greyscale", "grayscale"),
-                          exclude=("color", "colour")),
+                          prefer=("land", "greyscale", "grayscale"),
+                          exclude=("color", "colour", "bathymetry")),
         "bathymetry": best(is_bathy_name, prefer=("bathymetry",)),
         "rainfall": best(is_rainfall_name,
                          prefer=("averagerainfall", "rainfall", "precip"),
@@ -146,8 +149,9 @@ def interp_for_layer(name: str) -> str:
 
 def treat_as_color(name: str) -> bool:
     """Whether a layer is an sRGB colour image (vs linear data like a heightmap, a
-    rainfall map, or a categorical mask). Drives 8-bit-sRGB vs 16-bit-linear encode."""
-    if is_mask_name(name) or is_height_name(name) or is_rainfall_name(name):
+    rainfall/bathymetry map, or a categorical mask). Drives 8-bit-sRGB vs 16-bit-linear
+    encode -- so single-channel data crops stay 16-bit, not collapsed to 8-bit colour."""
+    if is_mask_name(name) or is_height_name(name) or is_rainfall_name(name) or is_bathy_name(name):
         return False
     return Path(name).suffix.lower() in _COLOR_EXTS
 
