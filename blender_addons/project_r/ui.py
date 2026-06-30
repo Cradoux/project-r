@@ -49,6 +49,7 @@ class PP_PT_main(_PRPanel, Panel):
         col.prop(s, "project_root", text="Root")
         col.prop(s, "planet_radius_km", text="Planet Radius")
         col.prop(s, "max_elevation_m", text="Max Elevation")
+        col.prop(s, "ocean_floor_depth_m", text="Ocean Floor Depth")
 
         mp = s.manifest_path()
         has_project = bool(mp and mp.exists())
@@ -249,6 +250,36 @@ class PP_PT_erosion_overlay(_PRPanel, Panel):
         col.prop(es, "overlay_r", text="Blur Ratio")
 
 
+class PP_PT_erosion_glacial(_PRPanel, Panel):
+    bl_label = "Glacial Erosion"
+    bl_idname = "PP_PT_erosion_glacial"
+    bl_parent_id = "PP_PT_erosion"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return deps.landlab_available()
+
+    def draw_header(self, context: bpy.types.Context) -> None:
+        self.layout.prop(context.scene.projection_pasta_erosion, "enable_glacial", text="")
+
+    def draw(self, context: bpy.types.Context) -> None:
+        es = context.scene.projection_pasta_erosion
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        layout.label(text="Carves fjords before coast & rivers", icon="FREEZE")
+        col = layout.column()
+        col.active = es.enable_glacial
+        col.prop(es, "glacial_ela_frac", text="Snowline")
+        col.prop(es, "glacial_steps", text="Steps")
+        col.separator()
+        col.prop(es, "glacial_k_g", text="Carving Strength")
+        col.prop(es, "glacial_quarry_mult", text="Quarrying")
+        col.prop(es, "glacial_diffuse", text="U-Trough Smoothing")
+
+
 class PP_PT_erosion_coastal(_PRPanel, Panel):
     bl_label = "Coastal Erosion"
     bl_idname = "PP_PT_erosion_coastal"
@@ -287,6 +318,53 @@ class PP_PT_erosion_coastal(_PRPanel, Panel):
         sub = col.column()
         sub.active = es.enable_coastal and es.coastal_swell_focus > 0.0
         sub.prop(es, "coastal_swell_deg", text="Swell Direction")
+
+
+class PP_PT_erosion_seafloor(_PRPanel, Panel):
+    bl_label = "Sea Floor / Gaea Export"
+    bl_idname = "PP_PT_erosion_seafloor"
+    bl_parent_id = "PP_PT_erosion"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return deps.landlab_available()
+
+    def draw_header(self, context: bpy.types.Context) -> None:
+        self.layout.prop(context.scene.projection_pasta_erosion, "enable_seafloor", text="")
+
+    def draw(self, context: bpy.types.Context) -> None:
+        es = context.scene.projection_pasta_erosion
+        s = context.scene.projection_pasta
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        layout.label(text="Fills the ocean + writes a Gaea-ready export", icon="MOD_OCEAN")
+        col = layout.column()
+        col.active = es.enable_seafloor
+        col.prop(s, "ocean_floor_depth_m", text="Ocean Floor Depth")
+        col.separator()
+        col.prop(es, "seafloor_shelf_depth_m", text="Shelf Break Depth")
+        col.prop(es, "seafloor_shelf_width_km", text="Shelf Width")
+        col.prop(es, "seafloor_shelf_relief_mod", text="Shelf vs Relief")
+        col.prop(es, "seafloor_slope_width_km", text="Slope Width")
+        col.separator()
+        col.prop(es, "seafloor_bathy_filename", text="Bathymetry Map")
+        sub = col.column()
+        sub.active = es.enable_seafloor and bool((es.seafloor_bathy_filename or "").strip())
+        sub.prop(es, "seafloor_input_weight", text="Map Weight")
+
+        # Gaea hand-off numbers from the last run -> the exact values to type into Gaea.
+        if es.last_gaea_height_m > 0.0:
+            box = layout.box()
+            box.label(text="Last Gaea export -- set in Gaea:", icon="EXPORT")
+            box.label(text=f"Sea level: {es.last_gaea_sea:.4f}")
+            box.label(text=f"Height: {es.last_gaea_height_m:.0f} m")
+            if es.last_gaea_width_scale < 0.999:
+                box.label(text=f"Terrain width x {es.last_gaea_width_scale:.3f} (keep H:W ratio)", icon="ERROR")
+            else:
+                box.label(text="Terrain width: unchanged (1:1)")
 
 
 class PP_PT_erosion_run(_PRPanel, Panel):
@@ -356,7 +434,9 @@ _CLASSES = (
     PP_PT_erosion,
     PP_PT_erosion_lem,
     PP_PT_erosion_overlay,
+    PP_PT_erosion_glacial,
     PP_PT_erosion_coastal,
+    PP_PT_erosion_seafloor,
     PP_PT_erosion_run,
     PP_PT_reassembly,
 )

@@ -147,6 +147,7 @@ class PP_OT_erode_section(bpy.types.Operator):
         if max_elev_m <= 0.0:
             max_elev_m = 8849.0
         height_m = bright * max_elev_m
+        ocean_floor_depth_m = float(s.ocean_floor_depth_m)  # world floor for the Gaea sea datum
 
         # --- Ground scale from the section's PHYSICAL extent, not pixel count, so the
         # cell size stays correct at any output/crop resolution (the crop may have been
@@ -177,6 +178,30 @@ class PP_OT_erode_section(bpy.types.Operator):
             work_w, work_h = W0, H0
             work_seed = height_m
         cell_work_m = ground_w_m / float(work_w)
+
+        # --- Optional glacial (fjord) pre-pass: carve U-troughs / over-deepened basins
+        # FIRST, before coastal and the LEM. This is the EARLIEST structural pre-pass. Like
+        # coastal, it reshapes work_seed ITSELF: the deepest troughs drop BELOW sea level, so
+        # the sea_mask re-derived from work_seed below treats them as ocean and the ocean
+        # restore KEEPS the flooded fjord instead of undoing it. Applied once here (not via
+        # run_erosion) so the coastal pass and the strength-blend baseline both see the fjords.
+        glacial_info = None
+        glacial_ice = None
+        if bool(es.enable_glacial):
+            g_sea = work_seed <= float(es.sea_level_m)
+            g_has_sea = bool(g_sea.any()) and not bool(g_sea.all())
+            g_land = ~g_sea
+            relief_hi = (float(np.percentile(work_seed[g_land], 98)) if g_land.any()
+                         else float(work_seed.max()))
+            g_ela = float(es.sea_level_m) + float(es.glacial_ela_frac) * (relief_hi - float(es.sea_level_m))
+            work_seed, glacial_ice, glacial_info = erosion.glacial_erode(
+                work_seed, cell_work_m, ela_m=g_ela,
+                k_g=float(es.glacial_k_g), quarry_mult=float(es.glacial_quarry_mult),
+                diffuse=float(es.glacial_diffuse), steps=int(es.glacial_steps),
+                sea_mask=g_sea if g_has_sea else None, sea_level=float(es.sea_level_m),
+            )
+            print(f"[Project-R] Glacial pre-pass (ELA {g_ela:.0f} m, K_g {es.glacial_k_g:.2e}, "
+                  f"steps {es.glacial_steps}): {glacial_info}")
 
         # --- Optional coastal (wave) pre-pass: rework the shoreline BEFORE the LEM ---
         # It reshapes work_seed ITSELF so the downstream sea_mask, the strength blend, and
@@ -236,6 +261,25 @@ class PP_OT_erode_section(bpy.types.Operator):
             except Exception as ex:
                 print(f"[Project-R] Warning: failed to load rainfall map '{rain_name}': {ex}")
                 rainfall_work = None
+
+        # --- Optional direct bathymetry map (for the sea-floor pass) -> [0..1] depth at work res ---
+        bathy_work = None
+        bathy_name = (es.seafloor_bathy_filename or "").strip()
+        if bool(es.enable_seafloor) and bathy_name:
+            bathy_path = root / "sections" / sec_id / "crops" / bathy_name
+            if bathy_path.exists():
+                try:
+                    bathy_img = imaging.load_image(bathy_path)
+                    bathy_px = bathy_img.pixels
+                    if bathy_px.ndim == 3:
+                        bathy_px = bathy_px[:, :, 0]
+                    bathy_work = layers.resample_2d(bathy_px.astype(np.float32), work_w, work_h)
+                except Exception as ex:
+                    print(f"[Project-R] Warning: failed to load bathymetry map '{bathy_name}': {ex}")
+                    bathy_work = None
+            else:
+                self.report({"WARNING"}, f"Bathymetry map '{bathy_name}' not found in this section's "
+                                         f"crops; using the procedural sea floor.")
 
         # Resolve LEM physics: a (scale x intensity) preset sized to the section, or the
         # manual sliders when Scale is Custom. Seed-noise stays user-controlled either
@@ -316,6 +360,8 @@ class PP_OT_erode_section(bpy.types.Operator):
             land = ~sea_mask_w
             z_out[land] = np.maximum(z_out[land], sea_level_m)
 
+            z_ocean_real = np.where(sea_mask_w, z_out, 0.0)  # real-metre ocean (incl. fjords) for the Gaea floor
+            pre_rescale_max = float(z_out.max())  # land peak BEFORE rescale -> sets brightness-per-metre
             z_out = erosion.rescale_peak(z_out, target_peak_m, base=0.0)
         finally:
             wm.progress_end()
@@ -339,6 +385,56 @@ class PP_OT_erode_section(bpy.types.Operator):
 
         inspect_path = root / "sections" / sec_id / f"{Path(hm_name).stem}__eroded.png"
         imaging.save_image(out_buf, inspect_path, "PNG", color_depth="16")
+
+        # --- Glacial ice as a SEPARATE overlay layer (metres of ice), encoded at the SAME
+        # brightness-per-metre as the heightmap above (thickness / pre-rescale land peak), so it
+        # composites 1:1 on top of the bedrock in Gaea2 -- add the two maps to recover the ice
+        # surface. Only written when a glacier actually formed. ---
+        ice_path = None
+        if glacial_ice is not None:
+            ice_thick = np.asarray(glacial_ice.get("thickness"))
+            if ice_thick.size and float(ice_thick.max()) > 0.0:
+                ice_bright = np.clip(ice_thick / max(pre_rescale_max, 1e-6), 0.0, 1.0).astype(np.float32)
+                ice_buf = imaging.ImageBuffer(width=work_w, height=work_h, channels=1,
+                                              pixels=ice_bright[..., None])
+                ice_path = root / "sections" / sec_id / f"{Path(hm_name).stem}__ice.png"
+                imaging.save_image(ice_buf, ice_path, "PNG", color_depth="16")
+                print(f"[Project-R] Saved glacial ice layer (max {float(ice_thick.max()):.0f} m): {ice_path}")
+
+        # --- Sea floor + Gaea export: fill the ocean with a realistic shelf/slope/abyssal floor
+        # (keeping the glacial fjords) and encode the WHOLE surface against the WORLD elevation
+        # range [sea - ocean_floor, max_elev]. That single range is shared by every section, so sea
+        # level lands at the SAME brightness everywhere (no colour seams) and Gaea's vertical scale is
+        # one constant. The processed/ heightmap above is untouched (land-normalized, sea=0), so
+        # in-Blender Reassembly is unaffected. ---
+        gaea_path = None
+        sf_info = None
+        if bool(es.enable_seafloor):
+            z_gaea_base = np.where(sea_mask_w, z_ocean_real, z_out)  # land at target metres, ocean real (fjords)
+            z_gaea, sf_info = erosion.seafloor_bathymetry(
+                z_gaea_base, cell_work_m, sea_level=sea_level_m,
+                shelf_depth_m=float(es.seafloor_shelf_depth_m),
+                shelf_width_km=float(es.seafloor_shelf_width_km),
+                shelf_relief_mod=float(es.seafloor_shelf_relief_mod),
+                slope_width_km=float(es.seafloor_slope_width_km),
+                floor_depth_m=ocean_floor_depth_m,
+                input_depth=bathy_work, input_weight=float(es.seafloor_input_weight),
+            )
+            g_min = sea_level_m - ocean_floor_depth_m
+            g_max = max_elev_m
+            span = max(g_max - g_min, 1e-6)
+            gaea_bright = np.clip((z_gaea - g_min) / span, 0.0, 1.0).astype(np.float32)
+            gaea_buf = imaging.ImageBuffer(width=work_w, height=work_h, channels=1,
+                                           pixels=gaea_bright[..., None])
+            gaea_path = root / "sections" / sec_id / f"{Path(hm_name).stem}__gaea.png"
+            imaging.save_image(gaea_buf, gaea_path, "PNG", color_depth="16")
+
+            es.last_gaea_sea = float((sea_level_m - g_min) / span)
+            es.last_gaea_height_m = float(min(span, 10000.0))
+            es.last_gaea_width_scale = float(min(span, 10000.0) / span)
+            print(f"[Project-R] Gaea export: datum [{g_min:.0f},{g_max:.0f}] m (span {span:.0f} m) | "
+                  f"set Gaea sea level = {es.last_gaea_sea:.4f}, Height = {es.last_gaea_height_m:.0f} m, "
+                  f"terrain width x{es.last_gaea_width_scale:.3f} | floor {sf_info}")
 
         # --- Quality readout ---
         theta = metrics.get("theta")
@@ -403,10 +499,38 @@ class PP_OT_erode_section(bpy.types.Operator):
                     "coastal_rate_m": float(es.coastal_rate_m), "coastal_steps": int(es.coastal_steps),
                     "coastal_swell_focus": float(es.coastal_swell_focus),
                     "coastal_talus_deg": float(es.coastal_talus_deg),
+                    "glacial": bool(es.enable_glacial),
+                    "glacial_ela_frac": float(es.glacial_ela_frac),
+                    "glacial_k_g": float(es.glacial_k_g),
+                    "glacial_quarry_mult": float(es.glacial_quarry_mult),
+                    "glacial_steps": int(es.glacial_steps),
+                    "seafloor": bool(es.enable_seafloor),
+                    "seafloor_shelf_depth_m": float(es.seafloor_shelf_depth_m),
+                    "seafloor_shelf_width_km": float(es.seafloor_shelf_width_km),
+                    "seafloor_shelf_relief_mod": float(es.seafloor_shelf_relief_mod),
+                    "seafloor_slope_width_km": float(es.seafloor_slope_width_km),
+                    "seafloor_bathy_map": bathy_name if bool(es.enable_seafloor) else "",
+                    "ocean_floor_depth_m": ocean_floor_depth_m,
                 },
                 "metrics": {k: _json_safe(v) for k, v in metrics.items()},
                 "coastal_metrics": ({k: _json_safe(v) for k, v in coastal_info.items()}
                                     if coastal_info else None),
+                "glacial_metrics": ({k: _json_safe(v) for k, v in glacial_info.items()}
+                                    if glacial_info else None),
+                "glacial_ice_path": (str((Path("sections") / sec_id /
+                                          f"{Path(hm_name).stem}__ice.png")).replace("\\", "/")
+                                     if ice_path is not None else None),
+                "gaea_export": ({
+                    "path": str((Path("sections") / sec_id /
+                                 f"{Path(hm_name).stem}__gaea.png")).replace("\\", "/"),
+                    "sea_brightness": round(float(es.last_gaea_sea), 4),
+                    "gaea_height_m": round(float(es.last_gaea_height_m), 1),
+                    "width_scale": round(float(es.last_gaea_width_scale), 4),
+                    "datum_min_m": round(float(sea_level_m - ocean_floor_depth_m), 1),
+                    "datum_max_m": round(float(max_elev_m), 1),
+                    "floor_metrics": ({k: _json_safe(v) for k, v in sf_info.items()}
+                                      if sf_info else None),
+                } if gaea_path is not None else None),
             }
             manifest_lib.write_manifest(mp, manifest)
         except Exception as e:

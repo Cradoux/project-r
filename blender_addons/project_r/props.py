@@ -290,6 +290,16 @@ class ProjectionPastaProjectSettings(PropertyGroup):
         min=1.0,
         soft_max=20000.0,
     )
+    ocean_floor_depth_m: FloatProperty(  # type: ignore[valid-type]
+        name="Ocean Floor Depth (m)",
+        description="Depth of the deepest ocean floor below sea level, WORLD-WIDE (pure black in the "
+                    "Gaea sea-floor export). With Max Elevation it sets the single elevation range every "
+                    "section is encoded against, so sea level lands at the SAME brightness in every "
+                    "section (otherwise sections show colour seams in Gaea). ~6000 m is a deep abyssal plain",
+        default=6000.0,
+        min=0.0,
+        soft_max=11000.0,
+    )
 
     normalize_heightmaps: BoolProperty(  # type: ignore[valid-type]
         name="Normalize Heights",
@@ -545,6 +555,61 @@ class ProjectionPastaErosionSettings(PropertyGroup):
         max=0.9,
     )
 
+    # --- Glacial (fjord) erosion (runs BEFORE coastal and the LEM; carves U-troughs) ---
+    enable_glacial: BoolProperty(  # type: ignore[valid-type]
+        name="Glacial Erosion",
+        description="Carve glacial U-troughs and over-deepened basins BEFORE the coast and rivers: "
+                    "ice gathers above the snowline, flows downhill, and grinds valleys that can drop "
+                    "BELOW sea level -- so once flooded they become fjords. Runs first, as the earliest "
+                    "structural pre-pass; the coast and rivers then work the glaciated terrain",
+        default=False,
+    )
+    glacial_ela_frac: FloatProperty(  # type: ignore[valid-type]
+        name="Snowline Height",
+        description="Height of the permanent snowline (equilibrium line altitude) as a fraction of the "
+                    "section's relief above sea level. LOWER = more of the map sits under ice = deeper, "
+                    "more widespread fjords; higher = only the tallest peaks glaciate",
+        default=0.30,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+    glacial_k_g: FloatProperty(  # type: ignore[valid-type]
+        name="Carving Strength",
+        description="Glacial erosion coefficient (K_g). Linearly scales trough depth. The default is the "
+                    "published calibration; raise for deeper troughs, but prefer LOWERING the Snowline "
+                    "for deep SUSTAINED fjords (too-strong carving can eat the icefield's own snowfield)",
+        default=1.9e-5,
+        min=0.0,
+        soft_max=1.0e-4,
+        precision=6,
+    )
+    glacial_quarry_mult: FloatProperty(  # type: ignore[valid-type]
+        name="Quarrying",
+        description="Extra plucking of bedrock steps (risers) on top of abrasion. Higher = blockier, more "
+                    "deeply over-deepened trough floors (real fjords need this; abrasion alone under-cuts)",
+        default=1.0,
+        min=0.0,
+        soft_max=4.0,
+    )
+    glacial_diffuse: FloatProperty(  # type: ignore[valid-type]
+        name="U-Trough Smoothing",
+        description="Lateral smoothing under thick ice that rounds valley cross-sections from V-shaped "
+                    "(river) toward U-shaped (glacial). 0 = off",
+        default=0.3,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+    glacial_steps: IntProperty(  # type: ignore[valid-type]
+        name="Glacial Steps",
+        description="Ice-erosion iterations. More steps = deeper troughs and longer fjords (and more "
+                    "compute)",
+        default=120,
+        min=1,
+        soft_max=400,
+    )
+
     # --- Coastal (wave) erosion (runs BEFORE the LEM; reworks the coastline) ---
     enable_coastal: BoolProperty(  # type: ignore[valid-type]
         name="Coastal Erosion",
@@ -617,6 +682,67 @@ class ProjectionPastaErosionSettings(PropertyGroup):
         default=True,
     )
 
+    # --- Sea floor / bathymetry + Gaea export (consistent global sea datum) ---
+    enable_seafloor: BoolProperty(  # type: ignore[valid-type]
+        name="Sea Floor",
+        description="Fill the ocean with a realistic continental margin (shelf -> shelf break -> slope "
+                    "-> abyssal floor), keeping the glacial fjords as deep troughs, and write a separate "
+                    "Gaea export (<map>__gaea.png) that encodes land AND sea against one world-wide "
+                    "elevation range -- so sea level is at the same brightness in every section. The "
+                    "Reassembly heightmap is unaffected",
+        default=False,
+    )
+    seafloor_shelf_depth_m: FloatProperty(  # type: ignore[valid-type]
+        name="Shelf Break Depth (m)",
+        description="Water depth at the shelf break, where the gentle continental shelf gives way to the "
+                    "steeper slope (~130 m on Earth)",
+        default=130.0,
+        min=1.0,
+        soft_max=600.0,
+    )
+    seafloor_shelf_width_km: FloatProperty(  # type: ignore[valid-type]
+        name="Shelf Width (km)",
+        description="Width of the continental shelf off a LOWLAND coast. Mountainous coasts get a "
+                    "proportionally narrower shelf (see Shelf vs Relief)",
+        default=60.0,
+        min=0.0,
+        soft_max=400.0,
+    )
+    seafloor_shelf_relief_mod: FloatProperty(  # type: ignore[valid-type]
+        name="Shelf vs Relief",
+        description="How strongly the bordering land's height narrows the shelf. 0 = uniform width "
+                    "everywhere; 1 = mountainous coasts plunge straight to deep water (active margin), "
+                    "lowlands keep a broad shallow shelf (passive margin)",
+        default=0.7,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+    seafloor_slope_width_km: FloatProperty(  # type: ignore[valid-type]
+        name="Slope Width (km)",
+        description="Width of the continental slope: the distance over which the floor drops from the "
+                    "shelf break down to the abyssal plain (Ocean Floor Depth)",
+        default=40.0,
+        min=1.0,
+        soft_max=300.0,
+    )
+    seafloor_bathy_filename: StringProperty(  # type: ignore[valid-type]
+        name="Bathymetry Map",
+        description="Optional crop name (in this section's crops/) of a painted/real depth map: white = "
+                    "deepest (Ocean Floor Depth), black = shoreline. Blended over the procedural shelf and "
+                    "still unioned with the fjords. Empty = fully procedural sea floor",
+        default="",
+    )
+    seafloor_input_weight: FloatProperty(  # type: ignore[valid-type]
+        name="Bathymetry Map Weight",
+        description="How strongly the Bathymetry Map overrides the procedural shelf (1 = use the map, "
+                    "0 = ignore it). Only matters when a Bathymetry Map is set",
+        default=1.0,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+
     # --- Output ---
     target_peak_m: FloatProperty(  # type: ignore[valid-type]
         name="Target Peak (m)",
@@ -636,6 +762,9 @@ class ProjectionPastaErosionSettings(PropertyGroup):
     last_router: StringProperty(name="router", description="Flow router used in the last run", default="", options=_RO)  # type: ignore[valid-type]
     last_secs: FloatProperty(name="secs", description="Last run wall-clock seconds", default=0.0, options=_RO)  # type: ignore[valid-type]
     last_report: StringProperty(name="report", description="Last run summary line", default="", options=_RO)  # type: ignore[valid-type]
+    last_gaea_sea: FloatProperty(name="gaea_sea", description="Sea-level brightness to set in Gaea (last run)", default=0.0, options=_RO)  # type: ignore[valid-type]
+    last_gaea_height_m: FloatProperty(name="gaea_height", description="Gaea 'Height' value in metres (last run)", default=0.0, options=_RO)  # type: ignore[valid-type]
+    last_gaea_width_scale: FloatProperty(name="gaea_width_scale", description="Terrain-width multiplier to keep height:width ratio (last run)", default=1.0, options=_RO)  # type: ignore[valid-type]
 
 
 def register() -> None:
