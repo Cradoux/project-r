@@ -448,6 +448,46 @@ class PP_OT_select_heightmap(Operator):
         return {"FINISHED"}
 
 
+class PP_OT_select_rainfall(Operator):
+    bl_idname = "pp.select_rainfall"
+    bl_label = "Select Rainfall Map"
+    bl_description = "Select a rainfall/precipitation image from source/ to drive erosion (brighter = wetter)"
+
+    filepath: bpy.props.StringProperty(  # type: ignore[valid-type]
+        name="Rainfall Map",
+        subtype="FILE_PATH",
+        default="",
+    )
+    clear: bpy.props.BoolProperty(default=False, options={"SKIP_SAVE"})  # type: ignore[valid-type]
+
+    def invoke(self, context: bpy.types.Context, event: bpy.types.Event):
+        if self.clear:
+            return self.execute(context)
+        # Start in the source/ folder.
+        s = context.scene.projection_pasta
+        root = s.project_root_path()
+        if root is not None:
+            source_dir = root / "source"
+            if source_dir.exists():
+                self.filepath = str(source_dir) + "\\"
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context: bpy.types.Context):
+        es = context.scene.projection_pasta_erosion
+        if self.clear:
+            es.rainfall_filename = ""
+            self.report({"INFO"}, "Rainfall map cleared (uniform rainfall)")
+            return {"FINISHED"}
+        if not self.filepath:
+            self.report({"ERROR"}, "No file selected")
+            return {"CANCELLED"}
+        filename = Path(self.filepath).name
+        es.rainfall_filename = filename
+        self.report({"INFO"}, f"Rainfall map set to: {filename}")
+        return {"FINISHED"}
+
+
 _CLASSES = (
     PP_OT_create_sphere,
     PP_OT_assign_preview_texture,
@@ -456,6 +496,7 @@ _CLASSES = (
     PP_OT_shrink_selection,
     PP_OT_set_overlay_opacity,
     PP_OT_select_heightmap,
+    PP_OT_select_rainfall,
 )
 
 

@@ -285,6 +285,21 @@ class PP_OT_reassemble(bpy.types.Operator):
             self.report({"ERROR"}, "Global size not set. Use Load World Map first.")
             return {"CANCELLED"}
 
+        # Optional global output resolution: scale the reassembled equirect map so its
+        # longest edge matches the chosen size (AUTO = the world-map size). This is the
+        # GLOBAL knob, separate from the per-section Output Resolution. Aspect preserved.
+        if str(s.reassembly_resolution) != "AUTO":
+            try:
+                target = int(s.reassembly_resolution)
+                longest = max(gw, gh)
+                if longest > 0 and target != longest:
+                    sc = target / float(longest)
+                    gw = max(2, int(round(gw * sc)))
+                    gh = max(2, int(round(gh * sc)))
+                    print(f"[Project-R] Reassembling at {gw}x{gh} (output resolution {target})")
+            except (TypeError, ValueError):
+                pass
+
         sections = manifest.get("sections", []) or []
         if not sections:
             self.report({"ERROR"}, "No sections in manifest.json")

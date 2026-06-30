@@ -35,8 +35,15 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-# One "amplitude unit" of seed-conditioning noise, in metres (matches the toolkit's UNIT).
+# One "amplitude unit" of seed-conditioning noise, in metres (legacy absolute fallback,
+# used only when a relief is not supplied).
 UNIT_M = 30.0
+
+# Seed-conditioning noise as a FRACTION of the terrain's relief per amplitude unit.
+# On real heightmaps the relief is hundreds-to-thousands of metres, so a fixed 30 m
+# perturbation is negligible and the Noise Amount appears to do nothing. Scaling to
+# relief makes the amount an actual lever: amp 0.55 -> ~3% of relief, amp 2 -> ~12%.
+REL_NOISE_FRAC = 0.06
 
 # Macro smoothing scale as a fraction of grid edge (scale-invariant vs the original 512 grid),
 # used only by the synthetic-seed helper for validation/preview.
@@ -253,12 +260,19 @@ def make_noise(kind: str, size: Tuple[int, int], seed: int = 7) -> np.ndarray:
     return tex.astype(np.float32)
 
 
-def condition_seed(height_m: np.ndarray, kind: str, amp: float, seed: int = 7) -> np.ndarray:
-    """Return ``height_m`` plus fine conditioning noise (amp in 30 m units, ~0.5-0.6 typical)."""
+def condition_seed(height_m: np.ndarray, kind: str, amp: float, seed: int = 7,
+                   relief_m: Optional[float] = None) -> np.ndarray:
+    """Return ``height_m`` plus fine conditioning noise. ``amp`` scales the noise
+    RELATIVE to ``relief_m`` (terrain relief) when given -- so it's a meaningful lever
+    at any terrain height -- and falls back to absolute 30 m units otherwise."""
     if kind == "none" or amp == 0.0:
         return height_m.astype(np.float32, copy=True)
     tex = make_noise(kind, height_m.shape, seed=seed)
-    return (height_m + amp * UNIT_M * tex).astype(np.float32)
+    if relief_m and relief_m > 0.0:
+        noise_std = amp * REL_NOISE_FRAC * float(relief_m)
+    else:
+        noise_std = amp * UNIT_M
+    return (height_m + noise_std * tex).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -873,6 +887,7 @@ def run_erosion(
     base: float = 0.0,
     sea_level_m: float = 0.0,
     flow_metric: str = "D8",
+    overlay_flow_metric: str = "Quinn",
     enable_coastal: bool = False,
     coastal_steps: int = 25,
     coastal_rate_m: float = 3.0,
@@ -910,7 +925,16 @@ def run_erosion(
     sea_mask = height_m <= float(sea_level_m)
     has_sea = bool(sea_mask.any()) and not bool(sea_mask.all())
 
-    seed = condition_seed(height_m, noise_kind, noise_amp, seed=noise_seed)
+    # Relief over land drives the (now relative) conditioning-noise amplitude, so the
+    # Noise Amount is a real lever regardless of the terrain's absolute height.
+    land0 = ~sea_mask
+    if land0.any():
+        land_vals = height_m[land0]
+        relief_m = float(np.percentile(land_vals, 99) - max(float(sea_level_m), float(np.percentile(land_vals, 1))))
+    else:
+        relief_m = float(height_m.max() - height_m.min())
+
+    seed = condition_seed(height_m, noise_kind, noise_amp, seed=noise_seed, relief_m=relief_m)
     if has_sea:
         seed = seed.copy()
         seed[sea_mask] = float(sea_level_m)  # don't condition (or erode) the ocean
@@ -939,10 +963,14 @@ def run_erosion(
 
     overlay_secs = None
     if enable_overlay:
+        # The overlay carve uses discharge MAGNITUDE (not FastscapeEroder's single-flow
+        # receivers), so it can use a MULTI-FLOW router (e.g. Quinn) that the D8 LEM
+        # cannot -- this is what lets the engraved channels meander off the grid instead
+        # of snapping to the 8 D8 directions.
         z, dr, overlay_secs = wilbur_overlay(
             z, cell_m, tile_km, res_px, rainfall=rain_field,
             depth_macro_m=overlay_depth_m, w_macro_km=overlay_w_macro_km, r=overlay_r,
-            skip_macro=True, base=base, flow_metric=flow_metric,
+            skip_macro=True, base=base, flow_metric=overlay_flow_metric,
         )
 
     # Restore the ocean to its original (flat/black) values -- the LEM held it at sea

@@ -10,6 +10,7 @@ Pure module (no bpy) so it stays unit-testable outside Blender.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,7 @@ import numpy as np
 # substrings of the crop filename (e.g. "world_heightmap.exr" -> height).
 HEIGHT_KEYWORDS = ("height", "elev", "dem")
 MASK_KEYWORDS = ("mask", "land", "plates", "labels")
+RAINFALL_KEYWORDS = ("rain", "precip")
 
 _COLOR_EXTS = (".png", ".jpg", ".jpeg")
 
@@ -33,6 +35,17 @@ def is_mask_name(name: str) -> bool:
     return any(k in n for k in MASK_KEYWORDS)
 
 
+def is_rainfall_name(name: str) -> bool:
+    # Token-based (not raw substring): 'rain' must START a name token, so 'rainfall'
+    # and 'rain_map' match but 'terrain' does NOT (it would silently feed a terrain
+    # heightmap in as the rainfall field). Also never classify a height/mask layer
+    # as rainfall.
+    if is_height_name(name) or is_mask_name(name):
+        return False
+    tokens = re.split(r"[^a-z0-9]+", Path(name).stem.lower())
+    return any(t.startswith(k) for t in tokens for k in RAINFALL_KEYWORDS)
+
+
 def interp_for_layer(name: str) -> str:
     """Reprojection interpolation: categorical masks must stay 'nearest' (no new
     label values invented at edges); everything else is 'linear'."""
@@ -40,9 +53,9 @@ def interp_for_layer(name: str) -> str:
 
 
 def treat_as_color(name: str) -> bool:
-    """Whether a layer is an sRGB colour image (vs linear data like a heightmap or
-    a categorical mask). Drives 8-bit-sRGB vs 16-bit-linear encode decisions."""
-    if is_mask_name(name) or is_height_name(name):
+    """Whether a layer is an sRGB colour image (vs linear data like a heightmap, a
+    rainfall map, or a categorical mask). Drives 8-bit-sRGB vs 16-bit-linear encode."""
+    if is_mask_name(name) or is_height_name(name) or is_rainfall_name(name):
         return False
     return Path(name).suffix.lower() in _COLOR_EXTS
 

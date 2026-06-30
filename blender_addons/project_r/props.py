@@ -434,11 +434,13 @@ class ProjectionPastaErosionSettings(PropertyGroup):
     )
     noise_amp: FloatProperty(  # type: ignore[valid-type]
         name="Noise Amount",
-        description="Conditioning-noise amplitude in 30 m units. ~0.5-0.6 breaks the grid while "
-                    "keeping the macro form; 1.0 swamps it",
+        description="Seed-conditioning noise as a fraction of the terrain's relief (scales with "
+                    "terrain height, so it works at any elevation). ~0.5 perturbs the drainage while "
+                    "keeping the macro form; higher reshapes it more. Change the Noise Seed for a "
+                    "different river pattern",
         default=0.55,
         min=0.0,
-        soft_max=2.0,
+        soft_max=3.0,
     )
     noise_seed: IntProperty(  # type: ignore[valid-type]
         name="Noise Seed",
@@ -514,8 +516,10 @@ class ProjectionPastaErosionSettings(PropertyGroup):
     # --- Multi-scale blur overlay (flat-bottomed channels) ---
     enable_overlay: BoolProperty(  # type: ignore[valid-type]
         name="Channel Overlay",
-        description="Engrave flat-bottomed channels onto the eroded surface with a LIGHT, fine-pass "
-                    "multi-scale blur overlay (preserves drainage concavity; a deep overlay would destroy it)",
+        description="Engrave flat-bottomed, MEANDERING channels onto the eroded surface using a "
+                    "multi-flow router (off-grid, unlike the D8 stream-power pass) plus a light "
+                    "multi-scale blur. This is what makes rivers curve instead of snapping to the "
+                    "grid; keep it light so it preserves the drainage concavity",
         default=False,
     )
     overlay_depth_m: FloatProperty(  # type: ignore[valid-type]

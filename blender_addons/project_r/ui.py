@@ -192,19 +192,8 @@ class PP_PT_erosion(_PRPanel, Panel):
             col.prop(es, "k_sp", text="Erodibility (K)")
         col.prop(s, "output_resolution", text="Detail / Output Res")
         col.prop(es, "target_peak_m", text="Target Peak")
-
-        row = layout.row()
-        row.scale_y = 1.4
-        row.operator("pp.erode_section", text="Erode Section", icon="MOD_FLUIDSIM")
-
-        if es.last_report:
-            box = layout.box()
-            ok = (0.4 <= es.last_theta <= 0.55) and (es.last_r2 > 0.9)
-            box.label(
-                text=f"theta={es.last_theta:.2f}  R2={es.last_r2:.2f}  band={es.last_band_slope:.3f}",
-                icon="CHECKMARK" if ok else "INFO",
-            )
-            box.label(text=f"{es.last_router}   {es.last_secs:.1f}s")
+        # The "Erode Section" button lives in PP_PT_erosion_run (a header-less child
+        # panel ordered last), so it sits BELOW the advanced sub-panels below.
 
 
 class PP_PT_erosion_lem(_PRPanel, Panel):
@@ -300,6 +289,38 @@ class PP_PT_erosion_coastal(_PRPanel, Panel):
         sub.prop(es, "coastal_swell_deg", text="Swell Direction")
 
 
+class PP_PT_erosion_run(_PRPanel, Panel):
+    # The Erode button + last-run readout. A header-less child panel with the highest
+    # bl_order so it renders AFTER the Advanced LEM / Channel Overlay / Coastal
+    # sub-panels -- i.e. the button sits at the very bottom of the Erosion section.
+    bl_label = "Run Erosion"
+    bl_idname = "PP_PT_erosion_run"
+    bl_parent_id = "PP_PT_erosion"
+    bl_order = 100
+    bl_options = {"HIDE_HEADER"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return deps.landlab_available()
+
+    def draw(self, context: bpy.types.Context) -> None:
+        es = context.scene.projection_pasta_erosion
+        layout = self.layout
+
+        row = layout.row()
+        row.scale_y = 1.4
+        row.operator("pp.erode_section", text="Erode Section", icon="MOD_FLUIDSIM")
+
+        if es.last_report:
+            box = layout.box()
+            ok = (0.4 <= es.last_theta <= 0.55) and (es.last_r2 > 0.9)
+            box.label(
+                text=f"theta={es.last_theta:.2f}  R2={es.last_r2:.2f}  band={es.last_band_slope:.3f}",
+                icon="CHECKMARK" if ok else "INFO",
+            )
+            box.label(text=f"{es.last_router}   {es.last_secs:.1f}s")
+
+
 # ---------------------------------------------------------------------------
 # Reassembly
 # ---------------------------------------------------------------------------
@@ -336,6 +357,7 @@ _CLASSES = (
     PP_PT_erosion_lem,
     PP_PT_erosion_overlay,
     PP_PT_erosion_coastal,
+    PP_PT_erosion_run,
     PP_PT_reassembly,
 )
 
