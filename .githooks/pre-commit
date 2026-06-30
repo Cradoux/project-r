@@ -1,0 +1,19 @@
+#!/bin/sh
+# Rebuild project_r.zip whenever the addon source is part of the commit, and stage it
+# so the packaged zip always ships in the same commit (and therefore gets pushed).
+#
+# Enable with: git config core.hooksPath .githooks
+#
+# Why pre-commit (not the old post-push): git has no "post-push" hook, so the previous
+# script never ran and the zip silently went stale. A pre-commit hook is the reliable
+# place to keep the committed zip in lock-step with the source.
+
+# Only repackage when the addon source is actually being committed.
+if git diff --cached --name-only | grep -q '^blender_addons/project_r/'; then
+  echo "[pre-commit] addon changed -> rebuilding project_r.zip"
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/package_addon.ps1 || {
+    echo "[pre-commit] package_addon.ps1 failed" >&2
+    exit 1
+  }
+  git add project_r.zip
+fi

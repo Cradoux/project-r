@@ -1,0 +1,4 @@
+# Git hooks are POSIX shell scripts; keep them LF so they run after checkout on all
+# platforms even though the repo uses core.autocrlf=true (CRLF would break the shebang).
+.githooks/** text eol=lf
+*.sh text eol=lf
