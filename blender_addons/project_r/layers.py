@@ -28,7 +28,10 @@ WORLD_KEYWORDS = ("truecolor", "colorsmooth", "coloursmooth")
 BATHY_KEYWORDS = ("bathy",)
 LANDSEA_KEYWORDS = ("landvssea", "landsea", "crustmap", "island")
 UPLIFT_KEYWORDS = ("orogeny", "uplift")
-ERODIBILITY_KEYWORDS = ("rocktype", "geolog", "litholog")
+# SoilDepth (a continuous viridis ramp: deep soil = thick erodible regolith) is the
+# preferred erodibility proxy. The categorical rock maps also match but their luminance
+# ordering is meaningless, so auto-detect only auto-fills the continuous pick.
+ERODIBILITY_KEYWORDS = ("soildepth", "rocktype", "geolog", "litholog")
 
 _COLOR_EXTS = (".png", ".jpg", ".jpeg")
 
@@ -137,7 +140,7 @@ def classify_source_folder(filenames):
         "world_map": best(is_world_name, prefer=("truecolor",)),
         "landsea_mask": best(is_landsea_name, prefer=("landvssea",)),
         "uplift": best(is_uplift_name, prefer=("orogeny",)),
-        "erodibility": best(is_erodibility_name, prefer=("rocktype", "geolog")),
+        "erodibility": best(is_erodibility_name, prefer=("soildepth", "rocktype", "geolog")),
     }
 
 

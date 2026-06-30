@@ -486,9 +486,10 @@ class ProjectionPastaErosionSettings(PropertyGroup):
     )
     erodibility_filename: StringProperty(  # type: ignore[valid-type]
         name="Erodibility Map",
-        description="Filename in source/ of a CONTINUOUS rock-softness map (brighter = softer = erodes "
-                    "faster). Decoded by luminance. Categorical rock-type maps need a class legend and "
-                    "are not supported here yet. Empty = uniform erodibility",
+        description="Filename in source/ of a CONTINUOUS rock-softness proxy (brighter = softer = erodes "
+                    "faster), e.g. SoilDepth (deep soil = thick erodible regolith). Decoded by luminance. "
+                    "Categorical rock-type maps need a class legend and aren't supported here yet. "
+                    "Empty = uniform erodibility",
         default="",
     )
     erodibility_contrast: FloatProperty(  # type: ignore[valid-type]

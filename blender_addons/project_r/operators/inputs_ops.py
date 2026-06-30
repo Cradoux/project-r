@@ -254,12 +254,27 @@ class PP_OT_detect_source_maps(Operator):
             except Exception as e:
                 notes.append(f"uplift decode failed: {e}")
 
-        # Erodibility's best auto-pick is a categorical rock map, whose luminance ordering is
-        # arbitrary -- so suggest it (set manually with a continuous map) rather than auto-fill.
-        for slot in ("world_map", "landsea_mask", "erodibility"):
+        # Erodibility: auto-fill only when the pick is a CONTINUOUS map (e.g. SoilDepth) whose
+        # luminance is a meaningful softness proxy; a categorical rock map is only suggested
+        # (its luminance ordering is arbitrary without a class legend).
+        if not (es.erodibility_filename or "").strip() and picks["erodibility"]:
+            try:
+                from PIL import Image as PILImage
+                er_rgb = np.asarray(PILImage.open(src / picks["erodibility"]).convert("RGB"), dtype=np.uint8)
+                n_unique = decode.detect_palette(er_rgb)[1]
+                if n_unique > 256:  # continuous
+                    name = _ingest_map(root, src / picks["erodibility"], transform="luminance")
+                    _set_slot_filename(context, "erodibility", name)
+                    filled.append(f"erodibility={name} (contrast {es.erodibility_contrast:.1f})")
+                else:
+                    notes.append(f"erodibility: {picks['erodibility']} (categorical; set a continuous "
+                                 f"map like SoilDepth manually)")
+            except Exception as e:
+                notes.append(f"erodibility check failed: {e}")
+
+        for slot in ("world_map", "landsea_mask"):
             if picks.get(slot):
-                hint = " (categorical; set manually with a continuous map)" if slot == "erodibility" else ""
-                notes.append(f"{slot}: {picks[slot]}{hint}")
+                notes.append(f"{slot}: {picks[slot]}")
 
         msg = "Auto-filled " + (", ".join(filled) if filled else "nothing new")
         if notes:
