@@ -62,6 +62,62 @@ class PP_PT_main(_PRPanel, Panel):
 
 
 # ---------------------------------------------------------------------------
+# Map Inputs (optional, consolidated source maps + auto-detect + mask export)
+# ---------------------------------------------------------------------------
+class PP_PT_inputs(_PRPanel, Panel):
+    bl_label = "Map Inputs"
+    bl_idname = "PP_PT_inputs"
+    bl_parent_id = "PP_PT_main"
+    bl_order = 0
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw_header(self, context: bpy.types.Context) -> None:
+        self.layout.label(text="", icon="IMAGE_DATA")
+
+    def draw(self, context: bpy.types.Context) -> None:
+        s = context.scene.projection_pasta
+        es = context.scene.projection_pasta_erosion
+        layout = self.layout
+
+        layout.label(text="All optional. Maps load into source/.", icon="INFO")
+
+        # Folder auto-detect for a consistent export set (e.g. Gleba).
+        row = layout.row()
+        row.scale_y = 1.2
+        row.operator("pp.detect_source_maps", text="Detect Maps in source/", icon="VIEWZOOM")
+
+        col = layout.column(align=True)
+
+        # World map (display) -- uses the existing loader (builds the preview sphere).
+        col.operator("pp.load_world_map", text="World Map (preview sphere)", icon="WORLD")
+
+        # Heightmap slot (copy-aware picker + clear).
+        hm = f"Heightmap: {s.heightmap_filename}" if s.heightmap_filename else "Heightmap (optional)"
+        r = col.row(align=True)
+        op = r.operator("pp.set_input_map", text=hm, icon="IMAGE_DATA")
+        op.slot = "heightmap"; op.clear = False
+        if s.heightmap_filename:
+            cl = r.operator("pp.set_input_map", text="", icon="X")
+            cl.slot = "heightmap"; cl.clear = True
+
+        # Rainfall slot (decoded from a colormap map on load).
+        rf = f"Rainfall: {es.rainfall_filename}" if es.rainfall_filename else "Rainfall (optional)"
+        r = col.row(align=True)
+        op = r.operator("pp.set_input_map", text=rf, icon="IMAGE_DATA")
+        op.slot = "rainfall"; op.clear = False
+        if es.rainfall_filename:
+            cl = r.operator("pp.set_input_map", text="", icon="X")
+            cl.slot = "rainfall"; cl.clear = True
+
+        # Categorical -> per-class B&W masks (Gaea downstream).
+        layout.separator()
+        box = layout.box()
+        box.label(text="Category Masks (for Gaea)", icon="MOD_MASK")
+        box.label(text="Biome / Koppen -> one B&W mask per class")
+        box.operator("pp.export_class_masks", text="Export Class Masks...", icon="EXPORT")
+
+
+# ---------------------------------------------------------------------------
 # Sphere
 # ---------------------------------------------------------------------------
 class PP_PT_sphere(_PRPanel, Panel):
@@ -428,6 +484,7 @@ class PP_PT_reassembly(_PRPanel, Panel):
 
 _CLASSES = (
     PP_PT_main,
+    PP_PT_inputs,
     PP_PT_sphere,
     PP_PT_section,
     PP_PT_section_advanced,
