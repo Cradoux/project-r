@@ -245,6 +245,73 @@ project/
 
 ---
 
+## In-Blender Erosion (GPL stream-power)
+
+Instead of (or in addition to) processing each section externally in Gaea/Wilbur, Project-R can carve
+**believable dendritic river drainage directly in Blender**. It runs a physically-based landscape
+evolution model (stream-power incision + hillslope diffusion) on the section crop — which already sits
+in the low-distortion, **equal-area** oblique Hammer projection, the geomorphically correct space to
+erode in — then writes the result to `processed/` so **Reassemble** blends it back into the global map.
+
+**Why this lives in Project-R:** the section/reassemble pipeline already does the hard geometry
+(equal-area crop + feathered seam blend), and because Project-R is **GPL** it can use the fast,
+near-linear GPL flow router (`PriorityFloodFlowRouter`, via `richdem`) that robustly handles the pits
+erosion creates — an MIT-only tool cannot.
+
+### Step 0: Install the erosion dependencies
+Erosion needs `landlab` (+ `scipy`) and, for the fast router, `richdem`. Click **Install
+Dependencies** in the panel (it installs everything to Blender's user site) and **restart Blender**.
+If `richdem` can't install, erosion still works using a slower MIT-licensed fallback router — the
+panel shows which router is active.
+
+### Step 1: Point it at a heightmap
+Set **Heightmap File** (in *Section Export*) to your height layer's filename (e.g. `heightmap.png`),
+and **Max Elevation (m)** to the metres represented by pure white. Erosion reads the section's
+heightmap crop, converts brightness → metres, erodes in metres, then re-encodes with the same
+brightness range.
+
+### Step 2: Configure erosion (Erosion panel)
+- **Section** — which section to erode (leave empty for the most recently created one).
+- **Seed Noise** — fine noise added before eroding so channels meander instead of snapping to grid
+  directions. *Smoothed Gauss* (default) or *Fractal* break the grid-bias; ~0.5–0.6 amount keeps the
+  large-scale form. (White noise does **not** help.)
+- **Climate** — a rainfall field so incision concentrates where it rains. *Orographic* gives the
+  strongest wet-windward / dry-rain-shadow contrast; *Tropical* and *Gradient* are gentler.
+- **Steps** — erosion iterations (~200 reaches the mature, naturally-concave drainage equilibrium).
+- **Erodibility (K)** — how aggressively rivers cut (smaller crops want a larger K than the global default).
+- **Advanced LEM Settings** — area/slope exponents (m, n), hillslope diffusivity, uplift, timestep,
+  noise seed, and **Max Work Resolution** (downsamples large crops before eroding to keep bake times
+  sane — erosion is blocking and scales ~linearly: ~2 min at 256 px, ~7 min at 512 px).
+- **Wilbur Overlay** *(optional)* — engraves shallow, flat-bottomed channels onto the eroded surface
+  (the Wilbur multi-scale "Incise Flow" carve, sized automatically from the section's resolution).
+  Kept deliberately light so it sharpens channels without destroying the LEM's drainage realism.
+- **Target Peak (m)** — linearly rescale the result so its max equals this height; `0` preserves the
+  section's original peak.
+
+### Step 3: Erode
+Click **Erode Section**. Blender will be busy for the duration (see timing above). When done, the panel
+shows a quality readout:
+- **theta** — slope-area concavity. Real river drainage sits at **~0.45–0.5**; pure noise reads ~0.
+- **R²** — how cleanly the drainage follows the stream-power law (want **> 0.9**).
+- **band** — valley-floor flatness proxy (lower = flatter, wider floors).
+
+A "drainage OK" verdict means theta ≈ 0.5 with high R². Always also eyeball the result — the
+hillshade is the real test. The eroded heightmap is written to
+`processed/<section_id>/<heightmap_filename>` (a drop-in that **Reassemble** picks up automatically),
+plus an inspection copy `sections/<section_id>/<name>__eroded.png`.
+
+The eroded heightmap is written **section-normalized** (its peak = white = the section's own
+elevation) — exactly the convention a Gaea/Wilbur export uses — and the operator records that
+elevation in `manifest.json`. So eroded sections compose correctly with each other and with
+externally-processed sections.
+
+### Step 4: Reassemble
+Run **Reassemble** as usual to blend the eroded sections into the global equirectangular map. Keep
+**Normalize Heights** ON (the default) so each section's recorded elevation is restored and
+multi-section relative heights come out correct.
+
+---
+
 ## Reassembling the Global Map
 
 ### Step 1: Validate Processed Files
