@@ -44,6 +44,110 @@ _MACRO_SIGMA_FRAC = 25.0 / 512.0
 
 
 # ---------------------------------------------------------------------------
+# Erosion presets (scale band x intensity)
+# ---------------------------------------------------------------------------
+# Scale sets base physics appropriate to the section's real-world size; intensity
+# scales how developed the drainage network gets (steps + erodibility). These are
+# starting points -- the Custom scale exposes every parameter for manual tuning.
+_SCALE_BANDS = (
+    ("LOCAL",       500.0,        dict(k_sp=4.0e-5, diffusivity=0.4, uplift=1.0e-3, dt=1000.0, steps=120, w_macro_km=2.0,
+                                       c_rate_m=2.0, c_notch_m=15.0, c_fetch_km=15.0, c_steps=20)),
+    ("REGIONAL",    1500.0,       dict(k_sp=3.0e-5, diffusivity=0.5, uplift=1.0e-3, dt=1000.0, steps=140, w_macro_km=5.0,
+                                       c_rate_m=3.0, c_notch_m=20.0, c_fetch_km=30.0, c_steps=25)),
+    ("CONTINENTAL", 4000.0,       dict(k_sp=2.5e-5, diffusivity=0.6, uplift=8.0e-4, dt=1500.0, steps=160, w_macro_km=10.0,
+                                       c_rate_m=5.0, c_notch_m=30.0, c_fetch_km=60.0, c_steps=30)),
+    ("SUPER",       float("inf"), dict(k_sp=2.0e-5, diffusivity=0.8, uplift=6.0e-4, dt=2000.0, steps=180, w_macro_km=20.0,
+                                       c_rate_m=8.0, c_notch_m=45.0, c_fetch_km=120.0, c_steps=35)),
+)
+_INTENSITY = {
+    "GENTLE":   dict(steps_mult=0.45, k_mult=0.6),
+    "MODERATE": dict(steps_mult=1.0,  k_mult=1.0),
+    "STRONG":   dict(steps_mult=1.4,  k_mult=1.5),
+}
+
+
+STANDARD_RESOLUTIONS = (512, 1024, 2048, 4096, 8192)
+AUTO_RES_CAP = 1024  # AUTO stays responsive; choose a fixed size for more detail
+
+
+def suggest_resolution(native_px: float, cap: int = AUTO_RES_CAP) -> int:
+    """A balanced 'optimal' longest-edge size for a section: the largest standard
+    resolution that does NOT exceed the crop's native size (so we never upscale and
+    invent source detail), floored at 512 and capped (default 1024) so AUTO erosion
+    stays responsive. Erosion cost scales ~linearly with pixels, so pick a fixed size
+    (up to 8192) for finer synthesized detail at the cost of time."""
+    n = max(int(round(native_px)), 1)
+    chosen = STANDARD_RESOLUTIONS[0]  # 512 floor
+    for s in STANDARD_RESOLUTIONS:
+        if s <= n:
+            chosen = s
+        else:
+            break
+    return min(chosen, cap)
+
+
+def resolve_resolution(choice: str, native_px: float) -> int:
+    """Map an output_resolution enum value ('AUTO' or a pixel number) to a concrete
+    longest-edge size for the section."""
+    c = (choice or "AUTO").upper()
+    if c in ("AUTO", "", "NATIVE"):
+        return suggest_resolution(native_px)
+    try:
+        return max(64, int(c))
+    except (TypeError, ValueError):
+        return suggest_resolution(native_px)
+
+
+def scale_band_for_extent(extent_km: float) -> str:
+    """Map a section's width in km to a scale band (the AUTO scale)."""
+    e = max(float(extent_km), 1.0)
+    for name, hi, _ in _SCALE_BANDS:
+        if e < hi:
+            return name
+    return "SUPER"
+
+
+def lem_preset(extent_km: float, scale: str = "AUTO", intensity: str = "MODERATE") -> Dict:
+    """Resolve (scale, intensity) -> a concrete LEM parameter dict. ``scale='AUTO'``
+    (or 'CUSTOM') derives the band from ``extent_km``; intensity scales steps + K."""
+    scale = (scale or "AUTO").upper()
+    if scale in ("AUTO", "", "CUSTOM"):
+        scale = scale_band_for_extent(extent_km)
+    base = next((b for n, _, b in _SCALE_BANDS if n == scale), _SCALE_BANDS[1][2])
+    inten = _INTENSITY.get((intensity or "MODERATE").upper(), _INTENSITY["MODERATE"])
+    return dict(
+        k_sp=base["k_sp"] * inten["k_mult"],
+        m_sp=0.5,
+        n_sp=1.0,
+        diffusivity=base["diffusivity"],
+        uplift=base["uplift"],
+        dt=base["dt"],
+        steps=max(20, int(round(base["steps"] * inten["steps_mult"]))),
+        overlay_w_macro_km=base["w_macro_km"],
+        scale_band=scale,
+    )
+
+
+def coastal_preset(extent_km: float, scale: str = "AUTO", intensity: str = "MODERATE") -> Dict:
+    """Resolve (scale, intensity) -> concrete coastal-erosion params, auto-sized to the section the
+    same way ``lem_preset`` sizes the river physics. Bigger sections get longer fetch + a taller
+    wave-attack band + faster cliff retreat; intensity scales rate (k_mult) and steps (steps_mult).
+    ``scale='AUTO'``/'CUSTOM' derives the band from ``extent_km``."""
+    scale = (scale or "AUTO").upper()
+    if scale in ("AUTO", "", "CUSTOM"):
+        scale = scale_band_for_extent(extent_km)
+    base = next((b for n, _, b in _SCALE_BANDS if n == scale), _SCALE_BANDS[1][2])
+    inten = _INTENSITY.get((intensity or "MODERATE").upper(), _INTENSITY["MODERATE"])
+    return dict(
+        rate_m=base["c_rate_m"] * inten["k_mult"],
+        notch_m=base["c_notch_m"],
+        max_fetch_km=base["c_fetch_km"],
+        steps=max(8, int(round(base["c_steps"] * inten["steps_mult"]))),
+        scale_band=scale,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Availability guards (mirror the scipy/Pillow guards in __init__.py)
 # ---------------------------------------------------------------------------
 
@@ -229,14 +333,27 @@ def _make_router(grid, runoff: np.ndarray, flow_metric: str = "D8") -> Tuple[obj
         return router, "DepressionFinderAndRouter"
 
 
-def _new_grid(seed_m: np.ndarray, cell_m: float):
-    """Build a RasterModelGrid seeded with ``topographic__elevation`` (open edges)."""
+def _new_grid(seed_m: np.ndarray, cell_m: float,
+              sea_mask: Optional[np.ndarray] = None, sea_level: float = 0.0):
+    """Build a RasterModelGrid seeded with ``topographic__elevation`` (open edges).
+
+    When ``sea_mask`` is given, ocean cells are pinned at ``sea_level`` and marked as
+    FIXED_VALUE boundary nodes: they become the base-level OUTLET the land drains
+    into, and -- because only core nodes evolve -- the sea neither uplifts nor
+    erodes. That keeps the coastline/landmass shape and leaves the ocean flat, while
+    rivers still terminate correctly at the coast.
+    """
     from landlab import RasterModelGrid
     size_y, size_x = seed_m.shape
     g = RasterModelGrid((int(size_y), int(size_x)), xy_spacing=float(cell_m))
     z = g.add_zeros("topographic__elevation", at="node")
     z[:] = seed_m.astype(np.float64).ravel()
     g.set_closed_boundaries_at_grid_edges(False, False, False, False)  # all edges open
+    if sea_mask is not None:
+        ocean = np.asarray(sea_mask, dtype=bool).ravel()
+        if ocean.any() and not ocean.all():
+            z[ocean] = float(sea_level)
+            g.status_at_node[ocean] = g.BC_NODE_IS_FIXED_VALUE
     return g, z
 
 
@@ -257,12 +374,16 @@ def lem_erode(
     dt: float = 1000.0,
     steps: int = 200,
     flow_metric: str = "D8",
+    sea_mask: Optional[np.ndarray] = None,
+    sea_level: float = 0.0,
 ) -> Tuple[np.ndarray, np.ndarray, Dict]:
     """Evolve ``height_m`` under stream-power incision + linear hillslope diffusion.
 
     Returns ``(z_metres, drainage_area_m2, info)``. ``rainfall`` is an optional per-node runoff
     multiplier (mean ~1); when None a uniform field is used, making ``E = K A^m S^n``. With a
     rainfall field the discharge ``Q = R*A`` drives ``E = K Q^m S^n`` (climate-driven incision).
+    ``sea_mask`` (cells at/below ``sea_level``) pins the ocean as a fixed base-level outlet so the
+    land erodes toward the coast without the sea uplifting or the coastline being reworked.
     """
     from landlab.components import FastscapeEroder, LinearDiffuser
 
@@ -272,7 +393,7 @@ def lem_erode(
     else:
         runoff = np.asarray(rainfall, dtype=np.float64).ravel()
 
-    g, z = _new_grid(seed, cell_m)
+    g, z = _new_grid(seed, cell_m, sea_mask=sea_mask, sea_level=sea_level)
     router, router_name = _make_router(g, runoff, flow_metric=flow_metric)
     sp = FastscapeEroder(g, K_sp=k_sp, m_sp=m_sp, n_sp=n_sp,
                          discharge_field="surface_water__discharge")
@@ -414,6 +535,205 @@ def wilbur_overlay(
 
 
 # ---------------------------------------------------------------------------
+# Coastal (wave) erosion overlay — fetch-driven shoreline reworking
+# ---------------------------------------------------------------------------
+# The LEM/Wilbur passes deliberately FREEZE the coast (the ocean is pinned as a
+# fixed base-level outlet). This pass does the opposite: it actively reworks the
+# shoreline with wave energy. Headlands that "see" lots of open water (long
+# fetch) erode and retreat into cliffs; the removed sediment is redeposited as
+# beaches in sheltered bays — the classic headland-and-bay equilibrium. Pure
+# numpy + the scipy-optional helpers above. The algorithm is REIMPLEMENTED from
+# the CEM (BSD) alongshore-transport idea + SCAPE-style shore-platform
+# downwearing, so it carries no model dependency and stays GPL-clean.
+#
+# Intended ordering: run this BEFORE lem_erode so rivers then incise the
+# reworked coast. Same `sea_mask = height_m <= sea_level` convention as
+# run_erosion; output stays in metres (peak-rescale downstream as usual).
+
+# Seaward look directions; diagonals carry a sqrt(2) step length.
+_DIRS8 = (
+    (-1, 0), (1, 0), (0, -1), (0, 1),
+    (-1, -1), (-1, 1), (1, -1), (1, 1),
+)
+
+
+def _shift_fill0(a: np.ndarray, dy: int, dx: int) -> np.ndarray:
+    """Shift ``a`` by (dy, dx) filling the exposed edge with 0 (no torus wrap, so
+    off-grid reads as land and never inflates fetch at the borders)."""
+    out = np.roll(np.roll(a, dy, axis=0), dx, axis=1)
+    if dy > 0:
+        out[:dy, :] = 0
+    elif dy < 0:
+        out[dy:, :] = 0
+    if dx > 0:
+        out[:, :dx] = 0
+    elif dx < 0:
+        out[:, dx:] = 0
+    return out
+
+
+def _sea_fetch(sea: np.ndarray, dy: int, dx: int, max_px: int) -> np.ndarray:
+    """Run-length (in cells, capped at ``max_px``) of contiguous sea looking in
+    direction (dy, dx). Value at a sea cell ~ open water ahead; 0 on land.
+
+    Parallel relaxation of ``F = sea * (1 + F[next])`` — the fixed point IS the
+    true run length, and each iteration grows every cell by at most 1, so
+    stopping after ``max_px`` iters caps the fetch at ``max_px`` (we don't care
+    about open water past the wave-relevant distance)."""
+    sea_f = sea.astype(np.float32)
+    F = sea_f.copy()
+    for _ in range(int(max(max_px, 1))):
+        nxt = _shift_fill0(F, -dy, -dx)  # value of the cell at c+(dy,dx), read at c
+        F = sea_f * (1.0 + nxt)
+    return F
+
+
+def wave_exposure(
+    height_m: np.ndarray,
+    cell_m: float,
+    sea_level: float = 0.0,
+    *,
+    max_fetch_km: float = 25.0,
+    swell_deg: Optional[float] = None,
+    swell_focus: float = 0.6,
+) -> np.ndarray:
+    """Per-cell wave-exposure field, in **metres of effective open-water fetch**.
+
+    For every cell we look seaward in 8 directions; exposure is the (optionally
+    swell-weighted) sum of the open-water fetch reaching it. Coast cells facing
+    long stretches of ocean (headlands) score high; the backs of bays score low.
+    Computed for land AND sea cells: land uses it as the erosion driver, sea uses
+    its inverse as the deposition "shelter" weight.
+
+    ``swell_deg`` is the compass bearing (0=N, 90=E) the dominant swell comes
+    FROM; ``swell_focus`` 0 -> isotropic, 1 -> strongly directional. None -> calm
+    (all directions equal)."""
+    sea = np.asarray(height_m, dtype=np.float32) <= float(sea_level)
+    max_px = max(1, int(round(max_fetch_km * 1000.0 / max(float(cell_m), 1e-6))))
+    max_px = min(max_px, max(height_m.shape))  # fetch can't exceed the grid
+
+    if swell_deg is None:
+        weights = [1.0] * len(_DIRS8)
+    else:
+        th = np.radians(float(swell_deg))
+        src = np.array([-np.cos(th), np.sin(th)])  # (dy,dx) the waves come FROM
+        weights = []
+        for (dy, dx) in _DIRS8:
+            v = np.array([dy, dx], dtype=np.float64)
+            v /= np.hypot(*v)
+            align = max(0.0, float(np.dot(v, src)))
+            weights.append((1.0 - float(swell_focus)) + float(swell_focus) * align)
+    wmean = max(sum(weights) / len(weights), 1e-9)
+
+    expo = np.zeros(height_m.shape, dtype=np.float32)
+    for (dy, dx), w in zip(_DIRS8, weights):
+        step_m = float(cell_m) * (np.sqrt(2.0) if (dy and dx) else 1.0)
+        F = _sea_fetch(sea, dy, dx, max_px)
+        neigh = _shift_fill0(F, -dy, -dx)  # fetch of the seaward neighbour, read at c
+        expo += (w / wmean) * neigh * step_m
+    return expo
+
+
+def coastal_erode(
+    height_m: np.ndarray,
+    cell_m: float,
+    *,
+    sea_level: float = 0.0,
+    steps: int = 25,
+    rate_m: float = 3.0,
+    notch_m: float = 20.0,
+    platform_depth_m: float = 4.0,
+    max_fetch_km: float = 25.0,
+    swell_deg: Optional[float] = None,
+    swell_focus: float = 0.6,
+    susceptibility: Optional[np.ndarray] = None,
+    deposition: bool = True,
+    deposit_radius_px: int = 6,
+    talus_deg: float = 0.0,
+    refetch_every: int = 3,
+) -> Tuple[np.ndarray, Dict]:
+    """Wave-driven coastal erosion + beach deposition.
+
+    Each step: (1) compute the fetch/exposure field; (2) erode land within the
+    wave-attack band (``notch_m`` above sea level), weighted by exposure and
+    ``susceptibility``, but never below the wave-cut platform at
+    ``sea_level - platform_depth_m``; (3) redeposit the removed volume as beaches
+    in sheltered (low-exposure) shallow water near the coast, capped at sea level;
+    (4) optional ``talus_deg`` collapse so undercut cliff faces retreat instead of
+    standing vertical. Flooded land becomes sea on the next step, so the coastline
+    physically retreats. Returns ``(z_metres, info)``.
+
+    Tuning notes: ``rate_m`` is the max vertical lowering at the most-exposed
+    waterline cell per step; ``notch_m`` sets how far up the cliff waves bite;
+    ``susceptibility`` is an optional (H,W) erodibility field (~1 = default rock,
+    >1 = soft, 0 = armoured). Fetch cost scales with ``max_fetch_km / cell``; on
+    big grids raise ``refetch_every`` or lower ``max_fetch_km``. Mass is conserved
+    up to what shallow shelter can hold — ``info['conserved_frac']`` reports the
+    rest (lost to deep water offshore)."""
+    z = np.asarray(height_m, dtype=np.float64).copy()
+    cell_area = float(cell_m) ** 2
+    floor = float(sea_level) - float(platform_depth_m)
+    sus = (np.ones_like(z) if susceptibility is None
+           else np.asarray(susceptibility, dtype=np.float64).reshape(z.shape))
+    talus_drop = (np.tan(np.radians(talus_deg)) * float(cell_m)) if talus_deg > 0 else 0.0
+
+    eroded_vol = 0.0
+    deposited_vol = 0.0
+    expo = None
+    hot = 0.0
+    t0 = time.perf_counter()
+    for it in range(int(steps)):
+        if expo is None or (it % max(int(refetch_every), 1) == 0):
+            expo = wave_exposure(z, cell_m, sea_level, max_fetch_km=max_fetch_km,
+                                 swell_deg=swell_deg, swell_focus=swell_focus)
+            hot = float(np.percentile(expo[expo > 0], 99)) if np.any(expo > 0) else 0.0
+        if hot <= 0.0:
+            break
+        e = np.clip(expo / hot, 0.0, 1.0)
+
+        # Erode the wave-attack band; clamp the cut so it can't pass the platform.
+        h = z - float(sea_level)
+        band = np.clip(1.0 - h / max(float(notch_m), 1e-6), 0.0, 1.0) * (h > 0.0)
+        erode = float(rate_m) * e * band * sus
+        erode = np.minimum(erode, np.maximum(z - floor, 0.0))
+        z = z - erode
+        vol = float(erode.sum()) * cell_area
+        eroded_vol += vol
+
+        # Redeposit as beaches in sheltered shallow water adjacent to the coast.
+        if deposition and vol > 0.0:
+            land = z > float(sea_level)
+            near = _maximum_filter(land.astype(np.uint8), size=2 * int(deposit_radius_px) + 1) > 0
+            room = np.clip(float(sea_level) - z, 0.0, None)  # >0 only where submerged
+            target = near & (room > 0.0)
+            if target.any():
+                shelter = np.clip(1.0 - e, 0.0, 1.0)
+                w = shelter * np.sqrt(room) * target
+                wsum = float(w.sum())
+                if wsum > 1e-9:
+                    add = (vol / cell_area) * (w / wsum)
+                    add = np.where(target, np.minimum(add, room), 0.0)
+                    z = z + add
+                    deposited_vol += float(add.sum()) * cell_area
+
+        # Light seaward collapse so undercut faces retreat (gated to the coast).
+        if talus_drop > 0.0:
+            coast = _maximum_filter((z <= float(sea_level)).astype(np.uint8),
+                                    size=2 * int(deposit_radius_px) + 1) > 0
+            zmin = _minimum_filter(z, size=3)
+            over = ((z - zmin) > talus_drop) & coast & (z > float(sea_level))
+            z = np.where(over, zmin + talus_drop, z)
+
+    secs = time.perf_counter() - t0
+    info = dict(
+        secs=round(secs, 2), steps=int(steps),
+        eroded_m3=round(eroded_vol, 1), deposited_m3=round(deposited_vol, 1),
+        conserved_frac=(round(deposited_vol / eroded_vol, 3) if eroded_vol > 0 else float("nan")),
+    )
+    return z.astype(np.float32), info
+
+
+# ---------------------------------------------------------------------------
 # Metrics (score on theta / band_slope, NOT spectral beta)
 # ---------------------------------------------------------------------------
 
@@ -537,6 +857,7 @@ def run_erosion(
     noise_seed: int = 7,
     climate_kind: str = "uniform",
     climate_strength: float = 1.0,
+    rainfall: Optional[np.ndarray] = None,
     k_sp: float = 3e-5,
     m_sp: float = 0.5,
     n_sp: float = 1.0,
@@ -550,30 +871,85 @@ def run_erosion(
     overlay_r: float = 0.4,
     target_peak_m: Optional[float] = None,
     base: float = 0.0,
+    sea_level_m: float = 0.0,
     flow_metric: str = "D8",
+    enable_coastal: bool = False,
+    coastal_steps: int = 25,
+    coastal_rate_m: float = 3.0,
+    coastal_notch_m: float = 20.0,
+    coastal_max_fetch_km: float = 25.0,
+    coastal_swell_deg: Optional[float] = None,
+    coastal_swell_focus: float = 0.0,
+    coastal_talus_deg: float = 0.0,
+    coastal_deposition: bool = True,
 ) -> Tuple[np.ndarray, Dict]:
-    """Full per-section pipeline: condition seed -> rainfall -> LEM -> (optional light Wilbur
-    overlay) -> linear peak rescale. Returns ``(eroded_metres, metrics_dict)``. Pure: callable
-    from the Blender operator and from a headless validation harness alike.
+    """Full per-section pipeline: (optional coastal wave reworking) -> condition seed -> rainfall
+    -> LEM -> (optional light Wilbur overlay) -> linear peak rescale. Returns
+    ``(eroded_metres, metrics_dict)``. Pure: callable from the Blender operator and from a
+    headless validation harness alike.
+
+    The coastal pass (when ``enable_coastal``) runs FIRST and reshapes the baseline surface, so
+    everything downstream -- ``sea_mask``, seed conditioning, the ocean restore -- sees the
+    reworked coast. The operator applies the same pass to its blend baseline (see erode_ops), so
+    coastline changes survive the strength blend instead of being restored away.
     """
     height_m = np.asarray(height_m, dtype=np.float32)
 
+    coastal_info = None
+    if enable_coastal:
+        height_m, coastal_info = coastal_erode(
+            height_m, cell_m, sea_level=float(sea_level_m), steps=coastal_steps,
+            rate_m=coastal_rate_m, notch_m=coastal_notch_m, max_fetch_km=coastal_max_fetch_km,
+            swell_deg=coastal_swell_deg, swell_focus=coastal_swell_focus,
+            talus_deg=coastal_talus_deg, deposition=coastal_deposition,
+        )
+
+    # Ocean = cells at/below sea level (from the ORIGINAL surface, before noise). They
+    # become fixed base-level outlets in the LEM and are restored exactly afterwards,
+    # so the sea stays flat and the coastline keeps its shape.
+    sea_mask = height_m <= float(sea_level_m)
+    has_sea = bool(sea_mask.any()) and not bool(sea_mask.all())
+
     seed = condition_seed(height_m, noise_kind, noise_amp, seed=noise_seed)
-    rainfall = climate_field(climate_kind, height_m.shape, strength=climate_strength) \
-        if climate_kind != "uniform" else None
+    if has_sea:
+        seed = seed.copy()
+        seed[sea_mask] = float(sea_level_m)  # don't condition (or erode) the ocean
+
+    # Per-node runoff multiplier driving discharge (Q = R*A). Priority: an explicit
+    # rainfall MAP (normalised to mean ~1 over land) > the synthetic climate pattern
+    # > uniform (None). The map lets incision concentrate where the user paints rain.
+    if rainfall is not None:
+        rain_field = np.asarray(rainfall, dtype=np.float64)
+        if rain_field.shape != height_m.shape:
+            rain_field = rain_field.reshape(height_m.shape)
+        land = ~sea_mask
+        mr = float(rain_field[land].mean()) if land.any() else float(rain_field.mean())
+        rain_field = (rain_field / mr) if mr > 1e-9 else rain_field
+        rain_field = np.clip(rain_field, 0.0, 10.0).astype(np.float32)
+    elif climate_kind != "uniform":
+        rain_field = climate_field(climate_kind, height_m.shape, strength=climate_strength)
+    else:
+        rain_field = None
 
     z, dr, lem_info = lem_erode(
-        seed, cell_m, rainfall=rainfall, k_sp=k_sp, m_sp=m_sp, n_sp=n_sp,
+        seed, cell_m, rainfall=rain_field, k_sp=k_sp, m_sp=m_sp, n_sp=n_sp,
         diffusivity=diffusivity, uplift=uplift, dt=dt, steps=steps, flow_metric=flow_metric,
+        sea_mask=sea_mask if has_sea else None, sea_level=float(sea_level_m),
     )
 
     overlay_secs = None
     if enable_overlay:
         z, dr, overlay_secs = wilbur_overlay(
-            z, cell_m, tile_km, res_px, rainfall=rainfall,
+            z, cell_m, tile_km, res_px, rainfall=rain_field,
             depth_macro_m=overlay_depth_m, w_macro_km=overlay_w_macro_km, r=overlay_r,
             skip_macro=True, base=base, flow_metric=flow_metric,
         )
+
+    # Restore the ocean to its original (flat/black) values -- the LEM held it at sea
+    # level, but the optional overlay is sea-unaware, so re-pin it here.
+    if has_sea:
+        z = z.copy()
+        z[sea_mask] = height_m[sea_mask]
 
     metrics = score(z, dr, cell_m)
 
@@ -584,6 +960,8 @@ def run_erosion(
         router=lem_info.get("router"),
         lem_secs=lem_info.get("secs"),
         overlay_secs=round(overlay_secs, 2) if overlay_secs is not None else None,
+        coastal_secs=coastal_info.get("secs") if coastal_info else None,
+        coastal_conserved_frac=coastal_info.get("conserved_frac") if coastal_info else None,
         cell_m=round(float(cell_m), 2),
     )
     return z.astype(np.float32), metrics
