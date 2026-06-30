@@ -1,0 +1,715 @@
+[
+ {
+  "name": "AverageHumidity",
+  "represents": "Average atmospheric humidity across the planet surface (a continuous scalar field, low = arid, high = humid)",
+  "encoding": "colormap_ramp:viridis",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "Build the matplotlib viridis LUT (256 entries \u00d7 3 uint8). For each pixel RGB, compute squared Euclidean distance to all 256 LUT entries and take the nearest-index i. Scalar = i / 255, giving a normalized humidity fraction in [0, 1]. Note: the anomalously large olive-khaki cluster (~63,57,9) at 33% of pixels sits around viridis index 60\u201370; verify by checking that visually bright-yellow coastal/wet zones decode near 1.0 and dark-purple continental interiors decode near 0. The bright-yellow extreme (254,231,36) matches viridis[255] = (253,231,37) to within 1 DN, confirming the ramp. If full LUT inversion gives poor residuals, fall back to luminance proxy L = (0.2126R + 0.7152G + 0.0722B) / 255 as a monotonic ordinal for rainfall weighting \u2014 precision loss is acceptable for that use.",
+  "value_semantics": "Dark purple/black (\u2248viridis index 0) = minimum humidity (dry continental interiors or arid zones). Olive-green (dominant, ~index 60\u201370) = moderate humidity \u2014 the modal land-surface state. Cyan-teal = moderately high. Bright yellow (\u2248viridis index 255, value 254,231,36) = maximum humidity. No legend or physical unit is visible in the image; range is likely a normalized [0,1] fraction or a relative scale internal to the Gleba generator. No explicit sea/ocean distinction; oceans appear at moderate-to-high humidity values in this map.",
+  "projectr_roles": [
+   "rainfall"
+  ],
+  "usefulness": "medium",
+  "aligned_equirect": "yes \u2014 4096x2048 (2:1 aspect ratio, confirmed by analyzer)",
+  "integration_notes": "Load as the optional rainfall map in Project-R's erosion stage. Decode via viridis LUT inversion (or luminance proxy) to produce a [0,1] per-pixel runoff weight. Crop and reproject to the Hammer section the same way the heightmap is treated; resampling is safe since the field is spatially smooth. Wire the scalar directly into the K_precip / discharge accumulation weight so wetter areas concentrate river incision. The map does not need to drive K_sp or uplift. It is also a reasonable biome-selection guidance layer (yellow/cyan zones = lush, worth selecting for river-heavy sections; dark-purple zones = arid, fewer rivers expected).",
+  "caveats": "1. Humidity \u2260 precipitation directly \u2014 coastal upwelling zones and rain-shadow highlands can have similar humidity but very different rainfall; if the export set includes an AverageRainfall or Precipitation map, prefer that as the rainfall driver. 2. The dark-olive cluster (63,57,9) at 33% of all pixels is anomalous for mid-viridis (which should be blue-teal at that index range); the Gleba generator may use a custom or non-standard colormap, so validate the decode on a few known-wet and known-dry pixels before relying on the scalar. 3. 8-bit depth gives at most 256 distinct levels \u2014 adequate for a runoff weighting field but introduces visible banding if rendered as a direct display overlay. 4. No ice-age vs. present-day variant distinction is apparent; if the export set contains both, check which climatological epoch this represents before pairing with a glacial erosion pass.",
+  "confidence": "medium"
+ },
+ {
+  "name": "AverageRainfall",
+  "represents": "Average planetary precipitation (rainfall intensity) encoded as a viridis colormap ramp across a 4096x2048 equirectangular projection. Yellow-green = high rainfall (equatorial ITCZ band), dark purple = low/arid zones (subtropical highs and rain shadows).",
+  "encoding": "colormap_ramp:viridis",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "1. Build the matplotlib viridis LUT: `import matplotlib.cm as cm; lut = (cm.get_cmap('viridis', 256)(range(256))[:, :3] * 255).astype(np.uint8)` \u2014 this gives a (256,3) uint8 array. 2. For each pixel (r,g,b) in the PNG, find the nearest LUT entry by minimising sum-of-squared RGB distance: `idx = np.argmin(np.sum((lut - pixel)**2, axis=1))`. 3. Scalar value = idx / 255.0, giving a float in [0, 1] where 0 = minimum rainfall and 1 = maximum rainfall. 4. No physical units are labelled (no colorbar present); the scalar is relative only. If absolute mm/yr is needed, cross-reference another export asset that contains the scale. No LUT inversion is required \u2014 viridis runs dark-to-bright low-to-high, matching the rainfall direction.",
+  "value_semantics": "0.0 (dark purple, approx RGB [20,0,40]) = minimum average rainfall; 1.0 (yellow, approx RGB [253,231,37]) = maximum average rainfall. No units labelled. Pixel luminance mean ~67/255 indicates most of the planet is relatively dry; the equatorial band concentrates the high-rainfall signal. The minimum-valued region (~1% of pixels at the darkest purple) likely represents extreme rain-shadow or polar desert.",
+  "projectr_roles": [
+   "rainfall"
+  ],
+  "usefulness": "high",
+  "aligned_equirect": "yes \u2014 4096x2048, exact 2:1 ratio, matches the standard Gleba export resolution",
+  "integration_notes": "This is a direct fit for Project-R's RAINFALL MAP slot (per-node runoff weighting for stream-power erosion). Integration steps: (1) At load time, decode the viridis ramp to a float32 single-channel array using the nearest-LUT-entry method above; store as a (2048,4096) array in [0,1]. (2) When a section is selected, crop and reproject the decoded array into the oblique Hammer section exactly as the heightmap is handled \u2014 resampling is fine since rainfall is a smooth field. (3) Pass the resampled scalar grid as the `rainfall` weight array into the erosion node; it scales local runoff accumulation (higher weight -> more incision). No further normalisation is needed unless the erosion code expects mm/yr \u2014 in that case multiply by a user-supplied max_rainfall_mm_yr parameter. The viridis-to-scalar decode should be done once on load, not per-section, to avoid repeated LUT operations.",
+  "caveats": "1. Viridis 8-bit encoding caps precision at 256 discrete rainfall levels; fine for erosion weighting but not for scientific quantification. 2. No physical units are embedded \u2014 only relative intensity is recoverable without a companion legend or metadata file. 3. Likely accompanied by MinRainfall.png and MaxRainfall.png siblings in the same export directory; AverageRainfall is the best single map for erosion but seasonal extremes (MinRainfall for drought, MaxRainfall for flood-pulse incision) could also be wired in. Check for those before finalising the rainfall slot. 4. The dark-purple ocean areas may encode near-zero rainfall over sea surface \u2014 verify that the land/sea mask from a sibling map is used to exclude ocean pixels so they do not suppress runoff at coastal cells.",
+  "confidence": "high"
+ },
+ {
+  "name": "Biome",
+  "represents": "Discrete biome / land-cover classes across the planet surface, with ocean areas left as white (no biome assigned). 13 unique flat-fill colors covering approximately 12 land biome classes plus an implicit ocean class (white).",
+  "encoding": "categorical_palette",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "All 13 colors are exact 8-bit flat fills \u2014 no anti-aliasing between classes. Build a 13-entry palette lookup table and map each pixel to its nearest entry (exact match works for most pixels; use nearest-L2 in RGB space for any boundary bleed pixels). Palette and tentative class labels: [255,255,255]=ocean/null (77.1%), [255,246,213]=arid desert/bare (7.0%), [205,222,135]=light grassland/shrub (5.0%), [113,200,55]=open forest/grass (1.9%), [135,222,205]=teal coastal wetland or shallow water (1.7%), [68,120,33]=mixed forest (1.4%), [236,236,236]=polar/ice/tundra (1.4%), [0,85,0]=dense jungle (1.4%), [44,160,90]=tropical/medium forest (1.3%), [255,221,85]=steppe/dry grassland (0.8%), [212,170,0]=savanna/golden grassland (0.8%), [200,113,55]=desert scrub/laterite (0.3%), plus one additional color below 0.1% not captured in top-12. Class labels are inferred from color appearance; verify against Gleba generator's biome enum. Output: integer class raster [0..12].",
+  "value_semantics": "Each pixel value is a discrete biome class ID with no ordinal meaning. White [255,255,255] is the null/ocean class. No physical units. No colorbar present in the image \u2014 class names must be cross-referenced against the Gleba planet generator's biome definitions.",
+  "projectr_roles": [
+   "world_map",
+   "section_selection",
+   "land_sea_mask"
+  ],
+  "usefulness": "medium",
+  "aligned_equirect": "yes \u2014 4096x2048 (standard Gleba export resolution, confirmed 2:1 aspect)",
+  "integration_notes": "Three uses: (1) world_map slot \u2014 load as-is in sRGB; visually readable on the preview sphere but 77% ocean white makes it less attractive than a TrueColor or shaded-relief composite. (2) section_selection overlay \u2014 render as a tinted categorical layer on the sphere so the user can click into a specific biome zone (e.g. dense jungle, coastal wetland). Requires a small palette-to-color UI legend. (3) Derived land_sea_mask \u2014 threshold: pixels where all channels == 255 \u2192 0 (ocean), else \u2192 1 (land). This gives Project-R a precise coastline mask at full resolution for free, without a separate mask export. For a future erodibility extension, a coarse biome-to-K_sp table (e.g. bare rock > desert > grassland > forest) could drive spatial K_sp from the class raster, but this is speculative and would need tuning against real lithology.",
+  "caveats": "Ocean is encoded as pure white [255,255,255] rather than a separate channel or alpha, so any land pixel that happens to be near-white (polar ice at [236,236,236]) is close to the null color \u2014 ensure the land/sea mask uses exact equality on all three channels, not a luminance threshold. Biome class names are not embedded in the image; the color-to-name mapping depends entirely on the Gleba generator's internal biome enum and may differ between generator versions. At 77% ocean coverage most of the raster is uninformative for land erosion workflows. If a separate LandSeaMask.png exists in the export set, prefer it over deriving one from this map. The 13th color not appearing in the top-12 list has negligible coverage (less than 0.05%) and may be an artefact of boundary bleed between adjacent biomes during export.",
+  "confidence": "high"
+ },
+ {
+  "name": "ClimateContinentality",
+  "represents": "Climate continentality index \u2014 how far each land location is from maritime/oceanic influence; proxy for seasonal temperature extremes and aridity of the continental interior",
+  "encoding": "unknown_rgb",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "Ocean fill is RGB(30,30,30) \u2014 mask these out first (abs(R-30)<8 AND G==B==R). For land pixels the ramp is a custom 3-stop encoding: low continentality = blue (0,0,255), mid = magenta (255,0,255), high = white (255,255,255). No standard matplotlib colormap fits (all mean_err > 0.16). Best scalar approximation without the source LUT: normalize per channel \u2014 continentality_01 \u2248 clamp((R + G - B + 255) / 510, 0, 1), which yields ~0 for pure blue (maritime coast) and ~1 for white (deep interior). Green channel is near-zero across most of the range and only rises to 255 at the white (maximum) pole, so it can be ignored except as a saturation flag. Treat the result as a relative index [0,1]; no physical unit range is visible in the image.",
+  "value_semantics": "Black/dark-grey (30,30,30) = ocean no-data. Blue = low continentality (maritime/coastal). Magenta/fuchsia = moderate-high continentality. White = maximum continentality (deep continental interior). No legend or numeric range is embedded in the image; units are dimensionless [0,1] relative to the planet's own range.",
+  "projectr_roles": [
+   "display_only",
+   "informational",
+   "section_selection"
+  ],
+  "usefulness": "low",
+  "aligned_equirect": "yes \u2014 4096x2048 (2:1), same footprint as the other Gleba exports",
+  "integration_notes": "No direct slot in the current Project-R pipeline. Two potential uses: (1) Section-selection guidance \u2014 high-continentality regions correlate with arid interiors where wind/flash-flood erosion dominates over river incision; expose as a heatmap overlay on the preview sphere so the user can consciously pick maritime vs continental sections. (2) Future K_sp / erodibility driver \u2014 continental interiors tend to be drier, less vegetated, and more erodible by flash events but less by sustained runoff; a mapped continentality field could modulate K_sp spatially if Project-R ever supports that. Neither use requires more than the approximate scalar decode above. To load: decode via the channel formula above, write to a float32 grayscale array, mask ocean to NaN, resample to section resolution.",
+  "caveats": "Ocean fill is RGB(30,30,30) not true black \u2014 a naive grayscale luminance threshold will misclassify it as low-continentality land; always mask explicitly. The custom colormap cannot be inverted with a named matplotlib LUT, so the scalar decode is an approximation; if the Gleba generator source exposes a palette table, prefer that. This map carries no erosion physics on its own \u2014 it is a climate descriptor, not a process rate. Potential redundancy with ClimatePrecipitation and ClimateTemperature maps in the export set, which together already imply continentality; this map is a derived summary of those.",
+  "confidence": "high"
+ },
+ {
+  "name": "ClimateLandVsSea",
+  "represents": "Binary land / sea mask \u2014 white = land, black = ocean",
+  "encoding": "binary_mask",
+  "channels_bitdepth": "3ch 8-bit RGB (all channels identical, effectively 1ch), 4096x2048",
+  "decode_recipe": "Convert to single channel: take R (== G == B). The result is a near-binary mask: values ~255 = land, values ~0 = sea, with a thin band of anti-aliased gray at coastlines. To get a clean boolean mask: pixel >= 128 \u2192 land (1), else sea (0). For a soft coastal weight (e.g. to taper erosion near shore), normalise: weight = R / 255.0. No colormap inversion needed \u2014 scalar is luminance directly.",
+  "value_semantics": "Black (0) = ocean / sea, covering ~73.6% of pixels. White (255) = land, covering ~20.9% of pixels. Remaining ~5.5% are anti-aliased coastline fringe values 1\u2013254. No physical units; purely topological.",
+  "projectr_roles": [
+   "land_sea_mask"
+  ],
+  "usefulness": "medium",
+  "aligned_equirect": "yes \u2014 4096x2048, 2:1 aspect, matches the standard Gleba export resolution",
+  "integration_notes": "Slot: land_sea_mask input (extension opportunity \u2014 Project-R does not yet have an explicit mask slot). Decode on load: single-channel float32, R/255. Use the threshold (>=0.5) mask to: (1) restrict stream-power erosion to land pixels only, avoiding artefacts where the heightmap dips below sea level near coasts; (2) drive the coastal/wave erosion pass \u2014 the coastline boundary is the set of land pixels adjacent to sea pixels; (3) define the ocean fill level for the continental-shelf blending pass more precisely than a raw brightness threshold on the heightmap. If Project-R already derives land/sea from the heightmap via a brightness cutoff, this map offers a cross-check / authoritative override. Priority for implementation: coastal erosion stage, which currently needs to detect the shoreline from the heightmap alone.",
+  "caveats": "Redundant with any heightmap-derived land/sea threshold; if TileElevation* maps encode ocean as black and land as positive, this mask adds little for simple cases. Its value is mainly for planets where the elevation-to-sea-level relationship is ambiguous or where the generator's sea level is not at elevation=0. The \"Climate\" prefix in the name suggests this may reflect a climate-model sea level (e.g. ice-age variant with lower sea level) rather than purely topographic land \u2014 check against sibling maps (e.g. any \"NoIce\" vs default variant) if ice-age and modern variants exist in the export. Anti-aliased coast fringe may produce a 1\u20132 pixel border of partial land weight; threshold at 0.5 cleanly removes it.",
+  "confidence": "high"
+ },
+ {
+  "name": "ClimateOceanCurrents",
+  "represents": "Ocean current climate zone categories across the planet surface, with landmasses shown in neutral gray. Encodes discrete current-type or climate-zone classes (cold polar, warm tropical, intermediate) via a small fixed-color palette.",
+  "encoding": "categorical_palette",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "Only ~5-7 truly distinct palette entries exist; the 69 unique colors are the base classes plus anti-aliasing interpolation at zone edges. Nearest-RGB-distance assignment: build a palette table from the dominant colors and snap every pixel to its closest entry. Approximate palette: land = [80,80,80], cold-polar = [38,41,49], warm-tropical-ocean = [69,65,49], and 2-4 intermediate zone tones around [65-70, 62-66, 48-50]. For any downstream use, clamp edge pixels (those not matching any base class within a tolerance of ~5 RGB counts) to their nearest base class.",
+  "value_semantics": "Purely categorical; no physical scalar, no units, no legend or colorbar visible in the image. Color identity encodes ocean current zone type (cold/warm/polar/equatorial etc.). Land appears as mid-gray [80,80,80] covering ~23% of pixels. Ocean zones span luminance ~40-50 (cold dark navy-gray polar bands top and bottom) to ~60-70 (olive warm tropical mid-latitudes).",
+  "projectr_roles": [
+   "display_only",
+   "informational"
+  ],
+  "usefulness": "low",
+  "aligned_equirect": "yes \u2014 4096x2048 (2:1), pixel-aligned with the sibling heightmap exports",
+  "integration_notes": "No current Project-R erosion slot maps to ocean current zones. Could be draped on the preview sphere as a world_map layer but the palette is very dark and muted (luminance 40-80/255) making it a poor visual display; the TileColor or surface-texture export will be far more useful for that role. As an extension, the cold-polar vs warm-tropical zone mask could weakly proxy a coastal erosion intensity modifier (cold polar = ice/wave energy) but this would require game-data research to confirm semantics before wiring. Most practical use is informational reference during section selection to identify coastlines with interesting current exposure.",
+  "caveats": "Class semantics (which color = which current type) are not labeled in the image and require cross-referencing Gleba game data or documentation. The 69 unique colors are mostly anti-aliasing noise at zone boundaries, not 69 distinct classes. Palette is extremely dark and low-contrast \u2014 unsuitable as a standalone world map display. Redundant with other climate exports (e.g. ClimatePrecipitation, wind maps) that directly drive erosion-relevant quantities like rainfall; this map adds no unique erosion-driving signal those others do not already cover.",
+  "confidence": "medium"
+ },
+ {
+  "name": "ClimateSurfaceWinds",
+  "represents": "Global surface wind speed (or wind intensity index) encoded as a smooth spatial field, with wind direction streamlines/arrows overlaid as red-orange pixel traces along coastlines and convergence zones",
+  "encoding": "colormap_ramp:cividis",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "1. Build the matplotlib cividis LUT: `import matplotlib.cm as cm; lut = (cm.cividis(np.linspace(0,1,256))[:,:3]*255).astype(np.uint8)`. 2. For each pixel, compute squared RGB distance to all 256 LUT entries; take argmin -> index in [0,255]. 3. Normalize: scalar = index / 255.0, giving [0,1] where 0=dark blue (low wind) and 1=bright yellow (high wind). 4. MASK OUT the overlaid streamline/arrow pixels before decoding: identify pixels whose RGB does not match any cividis entry within a threshold (e.g. nearest-LUT mean_err > 0.08 per channel); these red-orange and violet-blue traces are direction indicators, not wind speed data, and should be excluded or inpainted from neighbors. Physical units are unknown (no legend present); treat as a relative wind intensity field unless a companion metadata file supplies m/s range.",
+  "value_semantics": "Dark navy blue = minimum wind speed (poles and calm zones, luminance ~31/255); bright yellow = maximum wind speed (mid-latitude westerlies/trade-wind belts, luminance ~198/255). Value range in cividis index space is roughly 0.0 to 1.0 relative. No colorbar or numeric legend is visible in the image. The red-orange and blue-violet streaks on and near coastlines are overlaid wind direction arrows, not wind-speed values.",
+  "projectr_roles": [
+   "display_only",
+   "informational"
+  ],
+  "usefulness": "low",
+  "aligned_equirect": "yes \u2014 4096x2048 (2:1), standard Gleba export resolution, pixel-aligned with the heightmap exports",
+  "integration_notes": "No current Project-R slot accepts wind data. Do not wire into rainfall, heightmap, or bathymetry slots. Potential extension: a coastal-erosion intensity pass could weight wave energy by prevailing onshore wind magnitude \u2014 load via decode recipe above, crop/reproject alongside the heightmap section, then multiply the coastal erosion K factor by the resampled wind scalar at each coastal pixel. This requires implementing a new \"wind\" input slot in the coastal erosion operator. For now, the image can be loaded as the World Map display texture only if the wind-direction overlays (which discolor large coastal stretches) are acceptable for visualization; otherwise it is aesthetically distracting compared to a true color world map.",
+  "caveats": "1. Overlaid wind-direction streamlines (red-orange and blue-violet jagged traces concentrated on coastlines and jet-stream zones) are rendered on top of the cividis ramp; these pixels will yield garbage on colormap inversion and must be masked before any numerical use. 2. Physical units (m/s or dimensionless index) are not recoverable from the image alone \u2014 no legend visible. 3. Surface wind is not precipitation: this map cannot substitute for the rainfall map as an erosion driver without a separate wind-to-precipitation model. 4. No sibling wind maps were observed in the export set to cross-check against; verify whether an upper-level or seasonal variant exists before discarding.",
+  "confidence": "high"
+ },
+ {
+  "name": "CombinedTectonics",
+  "represents": "Global tectonic scalar field (likely uplift rate or crustal stress) encoded in viridis colormap, with tectonic plate boundary lines baked in as colored overlays (blue = divergent/spreading, dark-red = convergent/subduction, green = transform or other type)",
+  "encoding": "colormap_ramp:viridis",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "1. Build matplotlib viridis LUT: `lut = plt.get_cmap('viridis')(np.linspace(0,1,256))[:,:3]` (256x3, float32).  2. Load image as uint8 RGB array (H,W,3).  3. Create a boundary-line mask: flag pixels whose RGB is near (0,0,150) blue, (100,0,0) dark-red, or (0,128,0) green within Euclidean distance 30 \u2014 these are plate-boundary lines baked in; set scalar to NaN for those pixels.  4. Flag the solid-gray fill (80,80,80) \u00b1 5 \u2014 these represent ocean/stable-plate no-data regions; set scalar to 0 or NaN depending on use.  5. For remaining pixels: compute squared Euclidean distance from pixel RGB to each of the 256 LUT entries (scaled to 0-255); take argmin \u2192 index in [0,255]; scalar = index/255 in [0,1].  6. Rescale scalar to physical units if a legend is available (none visible in this export \u2014 treat [0,1] as relative tectonic intensity until calibrated).  Note: viridis runs dark-purple (low) \u2192 blue/teal \u2192 green \u2192 yellow (high); the visible image shows mostly green-to-yellow range, meaning the planet's active land is in the mid-to-high tectonic intensity band.",
+  "value_semantics": "0 (dark purple/black in viridis) = minimum tectonic intensity; 1 (yellow) = maximum. No numeric legend visible in the export \u2014 units unknown, treat as normalized [0,1] relative uplift/stress. The gray fill (RGB 80,80,80, ~22.7% of pixels) is a flat fill for ocean plates or stable cratons \u2014 not part of the viridis ramp. Plate boundary line pixels (~thin 1-2px strokes) are corrupted and carry no scalar meaning.",
+  "projectr_roles": [
+   "uplift",
+   "display_only"
+  ],
+  "usefulness": "medium",
+  "aligned_equirect": "yes \u2014 4096x2048 (2:1), matches the standard Gleba export resolution",
+  "integration_notes": "Primary use: spatial UPLIFT field U for the erosion extension. After decode, pass the [0,1] scalar grid as a per-pixel uplift multiplier into the stream-power stage (U_local = U_base * scalar). Steps to wire in: (1) on manifest load, decode viridis \u2192 scalar using the recipe above, store as float32 single-channel; (2) crop+reproject the scalar section alongside the heightmap section; (3) in erosion.py multiply the stream-power uplift term by the local scalar. The gray ocean fill should be zeroed out (ocean does not uplift). The baked boundary lines (thin 1-2px) are best healed by a 3x3 median inpaint over the masked pixels before use as a spatial field. Secondary use: world-map display layer \u2014 the viridis + colored boundary lines makes a visually distinctive sphere texture, usable as-is in the WORLD MAP slot.",
+  "caveats": "1. Boundary lines are baked into the raster \u2014 they corrupt thin strips of scalar data and must be masked and inpainted before use as a clean uplift field. 2. 8-bit only (429 unique colors after the gray fill and line colors are excluded) \u2014 viridis ramp is effectively 8-bit quantized, producing mild banding in the uplift field; no 16-bit version available. 3. Physical units unknown \u2014 no legend/colorbar in the export; the [0,1] scalar is relative only. 4. The gray fill (80,80,80) occupies 22.7% of pixels (ocean/stable plates) and sits outside the viridis ramp \u2014 needs explicit handling to avoid being mapped to a spurious scalar value (nearest viridis match for that gray would be around index 70/255, which is incorrect). 5. Redundancy: if a companion TectonicStress or UpliftRate single-channel map exists in the export set, prefer that over this composite. Check sibling exports for a cleaner scalar-only tectonic map before routing this through the viridis decode pipeline.",
+  "confidence": "medium"
+ },
+ {
+  "name": "CrustMap",
+  "represents": "Binary continental-crust mask: white = continental crust, black = oceanic crust / ocean basin. Marks tectonic crust type, not strictly land vs. sea (shallow continental shelves may appear white even if below sea level).",
+  "encoding": "binary_mask",
+  "channels_bitdepth": "3ch 8-bit RGB (all three channels identical), 4096x2048. Only 2 unique values: 0 and 255.",
+  "decode_recipe": "Convert to single-channel L: `mask = np.array(Image.open(path).convert('L'))`. Threshold: pixels == 255 \u2192 continental crust (1); pixels == 0 \u2192 oceanic crust / ocean (0). No LUT, no colormap, no interpolation needed. Result is a boolean uint8 array of shape (2048, 4096).",
+  "value_semantics": "Black (0) = 74.84% of pixels = oceanic crust / ocean. White (255) = 25.16% of pixels = continental crust / landmass. No intermediate values exist. No physical units; it is a categorical crust-type flag.",
+  "projectr_roles": [
+   "land_sea_mask"
+  ],
+  "usefulness": "medium",
+  "aligned_equirect": "yes \u2014 4096x2048 (2:1 aspect), matches the standard Gleba export resolution used by the sibling maps.",
+  "integration_notes": "Primary use: land/sea mask slot. Load as a uint8 binary array and use it to set ocean pixels to a fixed base elevation (e.g. 0 m) before erosion, rather than relying on a brightness threshold on the heightmap. This gives a clean, unambiguous shoreline definition. Secondary extension use: feed as a spatial erodibility modifier K_sp \u2014 continental crust could carry a different base erodibility than oceanic crust if the simulation ever extends into partially-submerged coastal zones. Not suited for rainfall, bathymetry, or world-map display roles.",
+  "caveats": "Crust type != land surface: continental crust includes shallow shelves that may still be below sea level in the heightmap, so the mask boundary will not align perfectly with the shoreline visible in the elevation data. Cross-check against TileElevation or the heightmap before using as a sea-level mask. 8-bit storage is fine given binary content (no banding risk). No legend or colorbar present in the image \u2014 interpretation of white=continental is inferred from name and visual shape matching the Gleba landmasses.",
+  "confidence": "high"
+ },
+ {
+  "name": "DebugIsLand",
+  "represents": "Binary land/sea mask \u2014 pixels mark whether each cell is land (island) or ocean",
+  "encoding": "binary_mask",
+  "channels_bitdepth": "3ch 8-bit RGB (all three channels identical), 4096x2048 \u2014 effectively 1-bit data stored in an 8-bit RGB file",
+  "decode_recipe": "Read any single channel (R, G, or B are identical). Two values only: 30 = ocean, 80 = land. Threshold at midpoint: pixel_value >= 55 \u2192 land (1), else ocean (0). No colormap involved; no LUT needed. Result is a boolean mask array of shape (2048, 4096).",
+  "value_semantics": "Value 30 (~77% of pixels) = ocean/sea. Value 80 (~23% of pixels) = land. No physical units; no legend present. The specific grey levels (30, 80) appear to be internal Gleba generator debug output values with no physical meaning beyond the binary distinction.",
+  "projectr_roles": [
+   "land_sea_mask",
+   "section_selection"
+  ],
+  "usefulness": "medium",
+  "aligned_equirect": "yes \u2014 4096x2048 (2:1), matches the standard Gleba export resolution",
+  "integration_notes": "As a land_sea_mask: load the R channel, threshold at 55, pass the boolean array into Project-R's sea-level/ocean definition so the erosion pipeline knows the precise coastline without relying on a brightness threshold of the heightmap. This is useful for coastal erosion passes (wave erosion stage) and for preventing river routing from crossing into sea cells. As section_selection guidance: overlay the mask on the preview sphere so the user can visually pick land regions \u2014 useful because landmasses are scattered and small (~23% coverage). Implementation: on load, binarise (>= 55) and cache as a uint8 mask; apply same equirect-to-oblique-Hammer crop as the heightmap so both arrays stay pixel-aligned.",
+  "caveats": "Potentially redundant with a sea-level threshold on the heightmap (TileElevation or equivalent) \u2014 if that map has a clear sea-level value, this mask adds little. Verify whether the heightmap already encodes a flat ocean floor at a fixed elevation before adding this as a separate input. The two stored grey levels (30, 80) have no meaning beyond land/sea; do not attempt to read sub-levels or intermediate values from this file. Stored as 3-channel RGB despite being 1-bit data \u2014 wasteful but harmless; convert to single-channel bool on load to save memory.",
+  "confidence": "high"
+ },
+ {
+  "name": "ErosionTimeWaterflow",
+  "represents": "Accumulated waterflow / drainage flux across land surfaces, color-coded with viridis; bright yellow-green threads are major river channels, dark purple is low-flow land, near-black is ocean (no-data sentinel)",
+  "encoding": "colormap_ramp:viridis",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "1. Ocean/no-data mask: pixels where R<35 AND G<35 AND B<35 (dominant color (30,30,30) is ~77% of image) \u2192 set scalar to NaN / skip. 2. For remaining land pixels: build the matplotlib viridis LUT at 256 entries (call matplotlib.colormaps['viridis'](np.linspace(0,1,256)) and convert to uint8 RGB). 3. For each land pixel, find the nearest LUT entry by Euclidean distance in RGB space \u2192 that entry's index / 255 gives a normalized scalar in [0, 1]. 4. scalar=0 is viridis dark-purple (low accumulated flow); scalar=1 is viridis yellow (high flow / major rivers). No absolute physical units are visible; the range is relative within each planet export. Note: the analyzer's cmap_fit ranked cubehelix first only because the (30,30,30) background sentinel dominates the fit; the actual land palette is clearly viridis (purple\u2192blue\u2192cyan\u2192yellow progression matches viridis exactly).",
+  "value_semantics": "Relative waterflow accumulation index, [0,1] after LUT inversion. Low values (purple) = minimal drainage / arid interior / high ground with short flow paths. High values (yellow) = major trunk rivers with large upstream catchments. No legend or physical units visible in the image. Ocean background sentinel is (30,30,30), not pure black.",
+  "projectr_roles": [
+   "land_sea_mask",
+   "display_only"
+  ],
+  "usefulness": "low",
+  "aligned_equirect": "yes \u2014 4096x2048, confirmed 2:1 aspect ratio, pixel-aligned with the other Gleba exports",
+  "integration_notes": "Primary use in Project-R is limited because Project-R already derives its own flow accumulation from the heightmap during the stream-power erosion pass \u2014 importing the planet generator's pre-computed flow would be circular. Two narrow legitimate uses: (1) LAND/SEA MASK: threshold the (30,30,30) sentinel to get a binary ocean mask without needing a separate mask layer \u2014 load image, apply `np.all(arr < 35, axis=-1)` \u2192 ocean pixels; feed into the coastline/continental-shelf pass as a hard ocean boundary. (2) DISPLAY: overlay the viridis ramp on the preview sphere as an informational layer showing the source planet's drainage topology; useful for the user to orient section selection around major river basins. As a RAINFALL MAP input it would be wrong \u2014 this is accumulated flow (a downstream integral), not input precipitation rate; using it as rainfall would double-count flow and produce unrealistic incision. If Project-R later gains a flow-network seeding extension, the river-channel pixels (scalar > 0.85, bright yellow) could initialize trunk channel positions before the erosion solver runs.",
+  "caveats": "The map encodes a derived erosion output (flow accumulation), not a primary physical field, so it carries no unique information beyond what a correctly run stream-power model on the heightmap would regenerate. The \"ErosionTime\" component of the name is not visually separable from the waterflow signal \u2014 the single viridis ramp appears to blend both quantities or one dominates. 8-bit quantization means only ~604 distinct colors survive, coarsening the flow gradient. The ocean sentinel (30,30,30) is not pure black, so any mask using a strict zero-threshold will miss ocean pixels; use threshold < 35 on all channels. No sibling map in this export set appears to be a pure waterflow layer, but ErosionRateFluvial or similar maps (if present) would be closely related and potentially redundant.",
+  "confidence": "medium"
+ },
+ {
+  "name": "ErosionTimeWaterflowCutoff",
+  "represents": "Binary waterflow-cutoff mask over land: pixels mark whether accumulated waterflow at each land cell exceeds the erosion-active threshold. Three categorical states: ocean (no data), land below cutoff (inactive), river channels above cutoff (active drainage network).",
+  "encoding": "categorical_palette",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "Exactly 3 palette entries. Map each pixel to its nearest entry by Euclidean distance in RGB space:\n  (30, 30, 30)   \u2192 class 0 = ocean / no-data        (77.1 % of pixels)\n  (68,  1, 84)   \u2192 class 1 = land, below cutoff     (21.2 %)\n  (254,231, 36)  \u2192 class 2 = river channel, above cutoff (1.7 %)\nThe two land colors are viridis colormap endpoints (index 0 and 255), but the image is NOT a ramp \u2014 there are only these three discrete values, confirmed by n_unique_colors=3. No intermediate indices exist; do not attempt colormap inversion.",
+  "value_semantics": "No physical scalar range. Class 0 = ocean/sea (black). Class 1 = land where cumulative upstream waterflow is below the generator's erosion-active cutoff (viridis purple). Class 2 = land where waterflow exceeds the cutoff, forming the active drainage / river network skeleton (viridis yellow branching lines). No legend or unit annotation visible.",
+  "projectr_roles": [
+   "land_sea_mask",
+   "section_selection",
+   "display_only"
+  ],
+  "usefulness": "low",
+  "aligned_equirect": "yes \u2014 4096x2048, exact 2:1, pixel-aligned with the other Gleba exports",
+  "integration_notes": "Two narrow uses only. (1) Land/sea mask extension: class 0 pixels give a clean binary ocean mask \u2014 if Project-R ever adds an explicit land/sea-mask slot, this delivers it precisely (OR with the black pixels from TileElevation* or similar). Decode class 0 as sea, classes 1+2 as land. (2) Section-selection guidance: the dense yellow river-network regions (notably the large southern continent and the northern landmass) flag geomorphologically interesting areas worth eroding \u2014 a user could visually pick sections there. Neither of these needs any new pipeline work beyond what the land/sea-mask extension would require. Do NOT wire it as a rainfall or erodibility driver \u2014 it carries no continuous scalar. Project-R already computes its own drainage network from scratch via stream-power erosion, so the pre-baked river skeleton here is redundant for the erosion stage itself.",
+  "caveats": "Pre-computed drainage network from the planet generator's own erosion model \u2014 will not match Project-R's independent stream-power computation and should not be used to seed or constrain it. Only 3 discrete values; no continuous gradient usable for driving erosion parameters. The ocean mask duplicates information already implicit in TileElevation* heightmaps (black = sea level or below). Viridis-coloured land classes may be confused with a continuous colormap ramp by naive decoders \u2014 must enforce the 3-entry palette lookup.",
+  "confidence": "high"
+ },
+ {
+  "name": "GeographicArea",
+  "represents": "Per-cell geographic area weight on the spherical planet \u2014 an equirectangular correction factor used by the planet generator to account for how much physical surface area each grid cell represents. Dark (near-black) pixels mark ocean / zero-area cells; bright white pixels mark land cells with high physical area (largest near the equator). Not a terrain property like elevation or rainfall.",
+  "encoding": "unknown_rgb",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "Extract luminance: L = (R*0.299 + G*0.587 + B*0.114) / 255. No clean colormap was identified (best cmap fit cubehelix mean_err=0.077, ramp_coverage=31% \u2014 too poor to use LUT inversion). The scalar field is L directly. To extract a land/sea mask: threshold at L > ~0.15 (empirically, the ocean cluster peaks near lum bucket 1-2 / L\u22480.05 and land peaks at lum buckets 9-12 / L\u22480.35\u20130.55). Color noise on land (slight R/G/B variation around a dark-blue base of B\u224850) is irrelevant noise; discard chroma and use luminance only.",
+  "value_semantics": "Black / near-black (RGB \u2248 [20, 20, 50]) = ocean or pole cells with negligible physical area. Bright white (RGB \u2248 [200, 200, 200+]) = land cells with maximum geographic area. Value min\u224814.6, max\u2248198.5, mean\u224859.3 (luminance in 0\u2013255 range). No legend or colorbar visible; no physical units (it is a dimensionless weighting factor).",
+  "projectr_roles": [
+   "land_sea_mask",
+   "informational"
+  ],
+  "usefulness": "low",
+  "aligned_equirect": "yes \u2014 4096x2048, 2:1 aspect confirmed",
+  "integration_notes": "Only plausible use in Project-R is as a rough land/sea mask: threshold luminance at ~0.15, binarize to land=1/ocean=0, and feed into the coastline/land-sea mask extension slot. However, the heightmap already encodes land vs. sea implicitly (ocean = low brightness / near zero), so this map is redundant in any setup that includes the heightmap. Do not use as heightmap, rainfall, or bathymetry \u2014 it carries no elevation or hydrological signal. If a clean land/sea mask is needed, prefer deriving it from the heightmap's zero-level threshold rather than this map.",
+  "caveats": "1. This is almost certainly an internal planet-generator correction factor (geographic area per equirectangular cell), not a terrain property \u2014 its primary use in the generator is resource distribution weighting, not visualization. 2. Redundant with the land/sea boundary already implicit in the heightmap and in any TileElevation sibling. 3. 8-bit with noticeable RGB color noise on land (B channel pinned at \u224850 in ocean, uncorrelated R/G variation on land) makes precise threshold extraction slightly noisy; apply a small median blur before thresholding. 4. No physical range or units are recoverable \u2014 no legend present.",
+  "confidence": "medium"
+ },
+ {
+  "name": "GeographicRegion",
+  "represents": "Discrete geographic/terrain regions on land; ocean rendered as a flat dark background. Land masses are subdivided into cell-like patches, each patch assigned a distinct pastel color (pinks, greens, blues, purples). The coloring appears Voronoi/noise-based \u2014 colors encode region identity, not any ordered scalar quantity.",
+  "encoding": "categorical_palette",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "1. OCEAN MASK: any pixel with all three channels <= 32 (background [30,30,30]) is ocean. 2. LAND REGIONS: for land pixels, perform nearest-color clustering (k-means or mean-shift) on RGB values to collapse 7 746 unique colors into the true number of distinct region classes. No standard colormap LUT applies \u2014 colors are arbitrary per-region palette entries. 3. OUTPUT: integer label image (0=ocean, 1..N=region ID). Physical meaning of each region ID is unknown without the Gleba generator's region-type legend; assume biome or terrain-type classes.",
+  "value_semantics": "Black/near-black [30,30,30] = ocean. Each distinct pastel color on land = one geographic region class (identity only; no ordered magnitude). No legend or colorbar is visible; no physical units. Colors are not perceptually ordered \u2014 green is not \"higher\" or \"wetter\" than pink.",
+  "projectr_roles": [
+   "land_sea_mask",
+   "section_selection",
+   "display_only"
+  ],
+  "usefulness": "medium",
+  "aligned_equirect": "yes \u2014 4096x2048, exactly 2:1, standard Gleba export resolution matching the heightmap grid",
+  "integration_notes": "Best immediate use is as a LAND/SEA MASK: threshold at luminance ~32 to produce a clean binary ocean/land boolean, which Project-R can use to define sea level precisely instead of relying on a brightness threshold on the heightmap. As a WORLD MAP display layer it is legible but unattractive (muted pastels on black); it reads better as a debug overlay than as the main sphere texture \u2014 prefer the color/albedo export for that slot if one exists. As SECTION SELECTION guidance: the region patches directly highlight natural geographic units a user might want to erode (e.g. \"pick a continent interior vs coastal region\"); exposing region IDs in the section picker could be a lightweight future feature. Do NOT wire it as a heightmap, rainfall, or bathymetry input \u2014 it encodes identity, not magnitude.",
+  "caveats": "7 746 unique RGB values means region boundaries are anti-aliased or the palette is very large; hard-clustering may need k in the range 50-200 to capture all classes cleanly. Without the Gleba generator's internal region-type table the class IDs are opaque \u2014 you know where each region is but not what it represents (climate zone? rock type? biome?). If the export set includes a separate land/sea or ocean-depth map that is already a clean binary or grayscale, this map is redundant for masking purposes. The near-black ocean fill [30,30,30] is not pure black \u2014 threshold must account for this (use a 3-channel distance < 5 test rather than == 0).",
+  "confidence": "high"
+ },
+ {
+  "name": "GeologicProvince",
+  "represents": "Discrete tectonic/geologic province classes: oceanic crust, continental craton, passive margin/shelf, elevated shield, and active orogenic belt / volcanic arc",
+  "encoding": "categorical_palette",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "Exactly 5 discrete colors \u2014 map each pixel to its class by nearest-color match (Euclidean distance in RGB):\n  (50,  50,  50)  \u2192 class 0: oceanic crust / ocean basin  (37.3% of map)\n  (136, 153, 170) \u2192 class 1: continental craton            (58.6%)\n  (170, 187, 204) \u2192 class 2: passive margin / shelf        ( 0.9%)\n  (204, 221, 238) \u2192 class 3: elevated shield               ( 0.6%)\n  (153, 255, 204) \u2192 class 4: active orogen / volcanic arc  ( 2.6%)\nNo interpolation; assign by nearest palette entry only. For K_sp driver: map class\u2192float, e.g. {0:NaN, 1:0.2, 2:0.5, 3:0.3, 4:1.0} (relative softness, tune to taste). For uplift driver: {0:0, 1:0.1, 2:0.05, 3:0.15, 4:1.0} (relative U, normalized). For land/sea mask: class 0 = sea, classes 1-4 = land (binary).",
+  "value_semantics": "No physical units \u2014 purely categorical. Class 4 (bright cyan #99FFCC) marks active convergent/divergent plate boundaries and volcanic arcs as continuous linear belts. Class 0 (near-black #323232) is the ocean floor. Classes 1-3 are shades of blue-gray distinguishing craton from margin from shield. No legend or colorbar present in the image; classes inferred from visual topology and color identity.",
+  "projectr_roles": [
+   "erodibility",
+   "uplift",
+   "land_sea_mask",
+   "section_selection"
+  ],
+  "usefulness": "medium",
+  "aligned_equirect": "yes \u2014 4096x2048, exactly 2:1, pixel-aligned with the standard Gleba export resolution",
+  "integration_notes": "Project-R does not currently consume this map, but three extension slots apply directly. (1) Spatial erodibility K_sp: after class-decode, bilinearly resample to section resolution and multiply the base K_sp scalar by the per-pixel factor \u2014 class 4 (volcanic arc) should be softest, class 1 (craton) hardest. (2) Spatial uplift U: same decode path; class 4 belts get highest U, driving mountain-building in the erosion ODE. (3) Land/sea mask: class 0 = ocean gives a crisp alternative to the brightness-threshold approach currently used on the heightmap \u2014 useful for defining sea level without tuning a threshold. (4) Section selection guidance: the bright cyan volcanic arc belts are visually striking and geologically rich targets; a helper that highlights class-4 pixels on the preview sphere would steer users toward interesting sections. Wire-in order of priority: land/sea mask first (zero-cost, high value), then K_sp, then U.",
+  "caveats": "Only 5 classes and no sub-class variation within each province \u2014 K_sp and U fields derived from it will be piecewise-constant blocky regions with hard edges at province boundaries; a small Gaussian blur on the decoded float field before feeding to the erosion solver is advisable to avoid numerical artefacts at transitions. The oceanic-crust class (class 0) covers 37% of the map but is irrelevant to land erosion; always mask it out before computing drainage stats. Thin boundary pixels between provinces may not cleanly snap to any of the 5 palette entries if anti-aliasing was applied at export \u2014 nearest-color matching handles this correctly. No ice-age vs. no-ice variant distinction applies here (geology is static). Check against TectonicPlate and CrustType sibling exports if present \u2014 they may encode overlapping information at different granularity.",
+  "confidence": "high"
+ },
+ {
+  "name": "InAndOutFlow",
+  "represents": "Net hydraulic flow balance per land cell \u2014 a diverging scalar encoding inflow-dominant (basin/sink) vs outflow-dominant (upland/source) zones, with river/watershed-boundary lines overlaid in yellow-green. Black is ocean/no-data.",
+  "encoding": "unknown_rgb",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "Three visually distinct classes dominate (159 total unique colors): (1) Black/near-black (30,30,30) ~77% \u2014 ocean / null, zero-flow mask. (2) Purple (~77,60,81) ~9.4% \u2014 net-inflow / convergence zones (basins, valley floors, lowlands). (3) Blue-gray/teal (~72,84,95 and neighbours) ~22% \u2014 net-outflow / divergence zones (uplands, slopes draining away). (4) Yellow-green lines (~180,200,60 range, sparse) \u2014 river channels or watershed divide boundaries.\n\nNo standard matplotlib colormap fits (best cubehelix at mean_err 0.10, only 34% coverage). This is a custom Gleba engine palette, not a recoverable scientific ramp.\n\nTo extract a scalar: threshold by hue. Convert to HSV. Pixels with V < 0.15 \u2192 class 0 (ocean). Remaining pixels: H in 270\u2013320\u00b0 (purple) \u2192 class 1 (inflow); H in 180\u2013230\u00b0 (teal-blue) \u2192 class 2 (outflow); H in 60\u201390\u00b0 (yellow-green) \u2192 class 3 (river lines). A signed scalar can be approximated as: value = (R \u2212 B) / 255, giving negative for teal outflow and positive for purple inflow, with ~0 for the ocean mask after excluding V < 0.15.",
+  "value_semantics": "Black = ocean / no data. Purple = net inflow (water accumulates; basins, lowlands). Teal-gray = net outflow (water drains away; uplands, ridges). Yellow-green lines = river channels or watershed divides. No physical units or legend visible. Raw pixel range 30\u2013113 in 8-bit luminance; actual scalar range is not quantified in absolute terms.",
+  "projectr_roles": [
+   "section_selection",
+   "display_only"
+  ],
+  "usefulness": "low",
+  "aligned_equirect": "yes \u2014 4096x2048 (2:1), standard Gleba export resolution matching the heightmap",
+  "integration_notes": "Project-R generates its own drainage network from the heightmap via stream-power erosion, so this map does not add new information to the erosion pipeline itself. Two narrow uses: (1) Section selection guidance \u2014 the purple inflow basins highlight the geomorphologically active lowland zones most likely to produce interesting erosion; displaying this on the preview sphere alongside the world map could help users pick productive sections. (2) Display-only overlay on the sphere to visualise catchment structure. Do NOT feed this as a rainfall or erodibility driver \u2014 the diverging encoding (inflow vs outflow) does not correspond to precipitation intensity. If a future extension adds watershed-aware K_sp variation, the inflow/outflow split could seed that, but decoding is manual (HSV thresholding above).",
+  "caveats": "No physical unit calibration visible \u2014 the purple/teal split is qualitative. The yellow-green river lines are very sparse and thin (single-pixel in places) and will alias badly at section crop resolution. The encoding is a custom Gleba palette with no documented standard; the HSV decode recipe above is a reverse-engineering approximation. 77% of the image is the constant near-black ocean fill, so land-area statistics occupy only ~23% of pixels. Redundancy: if a TileElevation or land-sea mask is available in the same export, the ocean mask here adds nothing. The inflow/outflow pattern is largely derivable from the heightmap itself by Project-R's own flow routing, making this map genuinely redundant for the erosion workflow.",
+  "confidence": "medium"
+ },
+ {
+  "name": "JanuaryRainfall",
+  "represents": "Monthly precipitation (January) across the planet surface \u2014 relative rainfall intensity showing ITCZ/monsoon belt and dry continental/polar regions",
+  "encoding": "colormap_ramp:viridis",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "1. Build the matplotlib viridis LUT: `import matplotlib.cm as cm; lut = (cm.get_cmap('viridis', 256)(range(256))[:, :3] * 255).astype(uint8)` \u2014 gives a (256,3) uint8 array. 2. For each pixel (r,g,b), find the nearest LUT entry by minimum Euclidean distance in RGB space: `idx = argmin(sum((lut - [r,g,b])**2, axis=1))`. 3. Normalized rainfall = idx / 255.0, range [0, 1] where 0 = driest and 1 = wettest. 4. Physical units are not shown (no legend/colorbar in image); scale by known max from Gleba documentation if available, otherwise use the [0,1] scalar directly as a relative runoff weight. The analyzer confirms viridis with mean_err=0.036 and ramp_coverage=1.0 \u2014 fit is reliable.",
+  "value_semantics": "Black/dark purple (viridis index ~0, ~2.2% of pixels at minimum value 10.5) = near-zero rainfall / arid zones. Yellow (viridis index ~255, value_max 215.6) = maximum precipitation, concentrated in a bright equatorial ITCZ-like band. Mean luminance ~66/255 (~index 80) indicates a predominantly dry planet with a narrow high-rainfall belt. No physical units (mm/day or mm/month) are recoverable from the image alone.",
+  "projectr_roles": [
+   "rainfall"
+  ],
+  "usefulness": "high",
+  "aligned_equirect": "yes \u2014 4096x2048, exact 2:1 aspect ratio, matches the standard Gleba export resolution",
+  "integration_notes": "Slot directly into Project-R's RAINFALL MAP input after decoding viridis index to [0,1]. The decode step must happen on load (not at erosion time) since Project-R expects a single-channel float or grayscale image: convert to a 4096x2048 float32 array of normalized indices, then save as a 16-bit grayscale PNG (multiply by 65535) for lossless resampling. At section crop time, Project-R bilinearly resamples this to the section resolution \u2014 the continuous viridis ramp survives resampling cleanly. January-specific data means erosion driven by this map models northern-hemisphere winter runoff; for a year-round average, blend with the companion JulyRainfall map (weight 0.5 each) or use an annual mean map if present in the export. Check the export folder for JulyRainfall.png and AnnualRainfall.png before choosing which to load.",
+  "caveats": "Redundancy: this is one of a likely rainfall trio (January / July / Annual); using only January biases river incision toward the wet season and misrepresents arid zones that receive summer rain. No colorbar is embedded, so the absolute rainfall scale (mm/day or mm/month) is unknown \u2014 the [0,1] relative scalar is sufficient for stream-power weighting but prevents physically calibrated discharge estimates. 8-bit colormap encoding introduces quantization: only 256 discrete rainfall levels are representable, and viridis index retrieval via nearest-color adds a small additional error (mean 0.036 in RGB space). The pronounced polar darkness (near-zero rainfall at poles) is physically reasonable but may over-suppress any polar erosion pass.",
+  "confidence": "high"
+ },
+ {
+  "name": "JulyRainfall",
+  "represents": "Monthly precipitation for July \u2014 a scalar rainfall field encoded with the viridis colormap. Shows a strong ITCZ equatorial wet band (bright yellow), flanked by subtropical dry zones (dark purple), with moderate mid-latitude and polar moisture. Pattern is climatologically coherent for a July summer monsoon configuration.",
+  "encoding": "colormap_ramp:viridis",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "1. Build the matplotlib viridis LUT: `import matplotlib.cm as cm; lut = (cm.get_cmap('viridis', 256)(range(256))[:, :3] * 255).astype(np.uint8)`. 2. For each pixel RGB, find nearest LUT entry by minimizing squared Euclidean distance across all 256 entries. 3. The result is a scalar index in [0, 255]; divide by 255 to get normalized rainfall in [0, 1]. 4. If physical units are needed and a reference range is supplied externally (e.g. 0\u2013500 mm/month from the Gleba export metadata), multiply by that range. No legend is embedded in the image so units cannot be recovered from pixels alone. The viridis fit is very strong (mean_err 0.036, ramp_coverage 1.0, confirmed by viridis endpoints: dark purple (20,0,40) at index ~0 and bright yellow (254,231,36) at index ~255 both present in top_colors).",
+  "value_semantics": "Viridis index 0 (dark purple, RGB ~20,0,40) = minimum rainfall (~4.8% of pixels, driest regions). Viridis index 255 (bright yellow, RGB ~254,231,36) = maximum rainfall (~3.2% of pixels, equatorial ITCZ core). Mid-range blue-purple (~65,65,134) dominates the subtropical and polar regions. No physical unit range is visible in the image; normalized [0,1] is usable as-is for relative runoff weighting.",
+  "projectr_roles": [
+   "rainfall"
+  ],
+  "usefulness": "high",
+  "aligned_equirect": "yes \u2014 4096x2048, exact 2:1 ratio, standard Gleba equirect export resolution matching the heightmap series.",
+  "integration_notes": "Direct drop-in for Project-R's RAINFALL MAP slot. After viridis decode to [0,1] scalar, pass the cropped section tile as the per-node runoff multiplier in the stream-power erosion stage. The equatorial ITCZ band will concentrate incision at low latitudes, which is physically correct. Resample to section resolution on load (bilinear is fine; rainfall is smooth). No masking needed \u2014 ocean pixels will have non-zero viridis-decoded values but the heightmap's sea-level mask will suppress erosion there regardless. If a sibling AnnualRainfall or mean-annual map exists in the export, prefer it for erosion (July alone overweights the ITCZ and underweights winter-dominant rainfall in Mediterranean-type climates); use this map only if seasonal variation is being modelled explicitly or no annual mean is available.",
+  "caveats": "July-specific: overestimates rainfall in the ITCZ summer hemisphere and underestimates in winter-dominant regions (e.g. southern mid-latitudes in July). For long-timescale erosion an annual mean is more representative. The viridis decode introduces a small quantization error (~0.036 mean RGB error) due to 8-bit storage; this is acceptable for erosion weighting but not for recovering precise mm values. No physical range (mm/month) is embedded \u2014 check Gleba export metadata or companion documentation to rescale. Watch for sibling rainfall maps (January, Annual) in the same export folder; they should be compared before choosing which to load.",
+  "confidence": "high"
+ },
+ {
+  "name": "Koppen",
+  "represents": "Koppen-Geiger climate classification zones for the planet's land surface; white = ocean (no class assigned)",
+  "encoding": "categorical_palette",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "Build a fixed palette LUT of all 28 observed RGB values and map each to a Koppen class label. Key entries from the analyzer: (255,255,255)=Ocean, (255,0,0)=hot arid/BWh or Aw tropical savanna, (255,150,150)=BSh hot steppe, (178,178,178)=gray polar/tundra ET, (0,126,126)=dark teal subarctic Dfc, (245,163,0)=orange BSk/semi-arid, (104,104,104)=mid-gray EF ice cap, (255,219,99)=yellow Csa/subtropical dry, (56,199,255)=light blue Cfb/oceanic, (70,169,255)=steel blue Dfb/humid continental, (198,1,199)=magenta Cwa/Am monsoon, (90,119,219)=slate-blue Dfc/Dwc. For boundary pixels with intermediate colors not in the palette, assign nearest-color by Euclidean RGB distance. Result is a per-pixel class integer (0=ocean, 1..N=land climate class). No scalar inversion needed; this is a label map only.",
+  "value_semantics": "28 discrete classes; 77.1% of pixels are white (ocean/no class). Remaining ~23% land pixels cover the full Koppen hierarchy A (tropical), B (arid/semi-arid), C (temperate), D (continental/boreal), E (polar). No physical magnitude is encoded \u2014 classes are nominal, not ordinal. No legend is visible in the image file itself; class-to-color mapping must be sourced from the Gleba planet generator's Koppen palette documentation.",
+  "projectr_roles": [
+   "display_only",
+   "section_selection"
+  ],
+  "usefulness": "low",
+  "aligned_equirect": "yes \u2014 4096x2048 (2:1), matches the standard Gleba export resolution; pixel-aligned with heightmap",
+  "integration_notes": "Not usable as a heightmap, rainfall, or bathymetry input \u2014 it is purely a climate-class label map. Two concrete uses: (1) Display-only: load as the world_map slot on the preview sphere so the user sees biome regions when selecting a section \u2014 the bright palette is visually distinctive and aids section picking. (2) Section-selection guidance: a user wanting to erode a hot-arid (red) vs boreal (teal) landscape can visually target those zones. Extension opportunity: the Koppen A-group (tropical) implies high rainfall; B-group implies low rainfall. A thin adapter could translate class labels to a synthetic rainfall scalar (e.g. Af=1.0, BWh=0.05) and feed it into the rainfall slot \u2014 but this would duplicate information already present in a dedicated rainfall export if one exists in the same export set. Check for a Precipitation or Rainfall PNG in the export folder before building that adapter. No erodibility (K_sp) or uplift (U) signal is directly recoverable from climate class alone.",
+  "caveats": "Redundancy risk: if the export set contains a dedicated rainfall/precipitation map, this Koppen map adds nothing for erosion driving. The 28-color palette is not the standard published Koppen RGB scheme used by Beck et al. 2018 \u2014 it is Gleba-specific, so class-to-color assignment must be confirmed from the generator's own legend or source code rather than assumed from standard Koppen color conventions. White is overloaded as ocean AND potentially as 'no data' at poles \u2014 verify polar white pixels are true ocean before using as a land/sea mask. 8-bit only, no precision concern (categorical data).",
+  "confidence": "high"
+ },
+ {
+  "name": "OldTectonicPlates",
+  "represents": "Historical tectonic plate tessellation \u2014 each filled region is one ancient plate, assigned an arbitrary distinct color; ~90 plates cover the full globe with no land/sea distinction encoded.",
+  "encoding": "categorical_palette",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "1. Collect all unique RGB triples in the image (analyzer found 90). 2. Sort them arbitrarily and assign integer plate IDs 0..N-1 \u2014 order is irrelevant since colors carry no scalar meaning. 3. For each pixel, find its nearest entry in the 90-color palette (L2 in RGB space; exact match should suffice given hard-filled regions) and write the plate ID. Result is a uint8 plate-ID raster. Boundaries between plates are detectable by finding pixels where adjacent plate IDs differ \u2014 these are the tectonically active zones. No legend is present; color-to-plate mapping is purely nominal.",
+  "value_semantics": "Each unique color = one plate ID (nominal label, no ordering, no units). Pixel value after decode = plate index 0..89. No min/max scalar range; the quantity is categorical. Plate area varies; largest plates (by pixel fraction) are ~5% of globe each.",
+  "projectr_roles": [
+   "uplift",
+   "section_selection",
+   "display_only"
+  ],
+  "usefulness": "medium",
+  "aligned_equirect": "yes \u2014 4096x2048 (2:1), same resolution as the Gleba heightmap exports",
+  "integration_notes": "Project-R does not yet consume categorical plate maps, but two extension paths are valuable: (1) UPLIFT field U \u2014 post-process the plate-ID raster to compute a boundary-proximity map (e.g. morphological edge detection between adjacent IDs, then distance transform inverted), giving high U near plate collisions. Wire this into the stream-power erosion stage as the spatial uplift input. (2) Section-selection guidance \u2014 highlight sections that straddle a plate boundary so the user finds tectonically interesting terrain. As a display-only world-map overlay it is vivid but uninformative to end users; prefer the color or biome map for that slot. If used for uplift, load as a categorical raster, compute the boundary mask at load time, and cache the distance-transform result alongside the section crop \u2014 do not resample categorically (use nearest-neighbor only).",
+  "caveats": "The \"Old\" qualifier means these are ancient/paleo plates, potentially predating the current continental configuration shown in the heightmap \u2014 tectonic boundaries here may not correspond to present-day mountain ranges or active margins. Boundary-derived uplift would therefore be an approximation at best and could misalign with actual terrain relief. No legend is present, so there is no way to recover plate names or types (oceanic vs continental) from colors alone. The analyzer's categorical_candidate flag was false due to the high color count (90), but visual inspection confirms it is unambiguously categorical. Anti-aliased edges between plates introduce a small number of mixed-color pixels that will be misclassified during nearest-color decode \u2014 apply a 1-pixel morphological closing on the ID map to clean seams before boundary detection.",
+  "confidence": "high"
+ },
+ {
+  "name": "OrogenyStrength",
+  "represents": "Tectonic orogeny strength (uplift intensity) per location on the planet surface \u2014 zero over oceans/quiet cratons, grading up through active margins to bright yellow-green at active mountain belts and plate convergence zones",
+  "encoding": "colormap_ramp:viridis",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "The image is a viridis-family sequential colormap rendered at ~105 quantization levels (not a true continuous 8-bit ramp). The dominant near-black color [17,0,21] at 41.9% is a sub-viridis sentinel for ocean/zero-orogeny zones; [68,1,84] at 13.2% is viridis index ~0, the true scale minimum. Step-by-step decode: (1) Build the matplotlib viridis LUT: import matplotlib.cm as cm; lut = (cm.get_cmap(\"viridis\")(np.linspace(0,1,256))[:,:3]*255).astype(np.uint8). (2) For each pixel, find the nearest LUT entry by Euclidean distance in RGB space -> index in [0,255]. (3) Pixels with RGB closer to [17,0,21] than to any viridis entry (L2 distance > threshold ~20) should be clamped to index 0 (ocean/zero). (4) Normalize: value = index / 255.0 -> orogeny strength in [0,1]. Bright yellow ([253,231,37]) = 1.0 = maximum orogeny; dark purple = 0.0 = inactive. No physical unit range is printed on the image; treat output as a dimensionless relative uplift factor.",
+  "value_semantics": "Black/near-black [17,0,21] = zero orogeny (ocean basins, stable cratons); purple [68,1,84] = minimal but non-zero; olive/teal mid-range = moderate orogenic activity; yellow-green [70,192,110] and bright yellow = maximum active uplift. Bright yellow features are narrow curvilinear strands \u2014 clearly active mountain belts and plate convergence sutures. 42% of pixels are at the zero sentinel. No legend visible in image; value range is normalized [0,1].",
+  "projectr_roles": [
+   "uplift"
+  ],
+  "usefulness": "high",
+  "aligned_equirect": "yes \u2014 4096x2048, confirmed 2:1, pixel-aligned with the other Gleba exports at the same resolution",
+  "integration_notes": "This is the primary candidate for the spatial uplift field U in the stream-power erosion model (extension slot, not yet wired in Project-R). Decode to a float32 [0,1] array at load time using the viridis LUT inversion above. Feed into the erosion stage as a per-pixel U multiplier: U_eff(x,y) = U_base * orogeny_strength(x,y). Regions with high orogeny_strength will resist erosion (uplift balances incision) producing persistent mountain belts; zero-orogeny ocean pixels should be masked out before erosion (use the land/sea mask from TileElevation or a companion mask map). Because the map is already at 4096x2048, it can be cropped to the section extent in the same pass as the heightmap with no separate resampling step. The narrow yellow mountain-belt strands would also serve as useful section-selection guidance \u2014 users could pick sections centred on bright features to get geologically interesting relief.",
+  "caveats": "Colormap identity is not confirmed as viridis \u2014 cmap_fit top hit is nipy_spectral (mean_err 0.091) and viridis did not appear in the top 5, possibly because the image is quantized to only 105 unique colors and ramp_coverage is low. If viridis decode produces artefacts, try inferno or magma as fallbacks (both in top 5). The near-black sentinel [17,0,21] sits outside the standard viridis range and must be handled separately or it will map to a spurious low positive value instead of zero. The 8-bit quantization (105 levels) means spatial gradients within orogenic zones are stairstepped \u2014 acceptable for a slowly varying uplift field but worth noting. Check against any sibling TectonicPlate or CrustThickness maps in the export set for redundancy before building the uplift slot.",
+  "confidence": "medium"
+ },
+ {
+  "name": "PopulationDensity",
+  "represents": "Spatial distribution of population density across the planet surface; land-only signal, ocean and uninhabited areas are a custom null value.",
+  "encoding": "colormap_ramp:viridis",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "1. Mask null pixels: any pixel with RGB == [30, 30, 30] \u2192 density = 0 (these are ocean / zero-population; they are NOT part of the viridis ramp). 2. For all remaining pixels: build the matplotlib viridis LUT (256 entries \u00d7 3 uint8 via matplotlib.cm.get_cmap('viridis', 256)). Map each pixel to its nearest LUT entry by Euclidean RGB distance \u2192 that entry's index / 255 gives a normalized density in [0, 1]. Only roughly the lowest 12.5% of the viridis ramp appears (dark purple \u2192 mid purple); do not extrapolate beyond what is observed. Physical units are unknown \u2014 no legend or colorbar is present in the image; treat output as relative density [0, 1].",
+  "value_semantics": "Black [30, 30, 30] = null / uninhabited (ocean or empty land). Viridis index 0 \u2248 [68, 1, 84] = lowest non-zero density (4.8% of pixels). Mid-purple tones \u2248 [69, 48, 124] = moderate density. No brighter greens or yellows are present, meaning the density peak is in the low end of the viridis scale. No colorbar visible; absolute units (e.g. persons/km\u00b2) are not recoverable from the image alone.",
+  "projectr_roles": [
+   "section_selection",
+   "informational"
+  ],
+  "usefulness": "low",
+  "aligned_equirect": "yes, 4096x2048 (2:1 aspect confirmed)",
+  "integration_notes": "Load as a display-only overlay on the preview sphere to help the user pick regions of worldbuilding interest (populated continents). Do not feed it to any erosion stage \u2014 it carries no terrain, hydrology, or rock-type information. As a future extension, it could serve as a section-selection weight (bias the user's crop picker toward high-density areas) or as a post-erosion annotation layer, but neither path is currently wired in Project-R. No slot maps to it directly.",
+  "caveats": "The [30, 30, 30] null value must be masked before colormap inversion \u2014 it is not viridis index 0 and will decode incorrectly if included. Only ~12% of the viridis ramp is actually used, so the recovered [0,1] values will all cluster near zero; rescaling to [min_nonzero, 1] may be more useful in practice. No physical units are visible. Luminance-based decoding will produce wrong values \u2014 nearest-LUT decode is required. No redundancy issue with other exports (population is a distinct layer), but it offers far less erosion-driving information than the climate, rainfall, or elevation maps in the same export.",
+  "confidence": "medium"
+ },
+ {
+  "name": "RainShadow",
+  "represents": "Rain shadow intensity \u2014 the orographic reduction in precipitation on the leeward side of terrain. High values mark the driest zones sheltered by mountain barriers; the ocean and areas with no orographic blocking are masked to a near-black sentinel.",
+  "encoding": "colormap_ramp:viridis",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "1. Build the matplotlib viridis LUT: `lut = plt.get_cmap('viridis')(np.linspace(0,1,256))[:,:3] * 255` (256x3 uint8).\n2. Identify sentinel/ocean pixels: any pixel where all three channels are near (30,30,30) \u2014 specifically where max(R,G,B) < 45. These are no-data; assign NaN or 0.\n3. For all remaining land pixels: compute per-pixel L2 distance to every row in the LUT, take argmin -> index in [0,255]. Divide by 255.0 to get normalized rain-shadow intensity in [0,1].\n4. Result: 0 = no rain shadow (windward or flat), 1 = maximum rain shadow (driest leeward zone). Ocean/no-data pixels are the (30,30,30) sentinel, NOT a valid viridis entry (viridis[0] \u2248 [68,1,84]).",
+  "value_semantics": "Min meaningful value ~0 (purple, ~[68,1,84]) = minimal orographic drying; max ~1 (yellow, ~[253,231,37]) = strongest rain shadow. ~77% of pixels are the [30,30,30] ocean/null sentinel. ~18% are the viridis low end (purple land with mild shadow). Yellow hotspots are narrow leeward corridors at mountain crests. No physical units visible; value is a dimensionless shadow index.",
+  "projectr_roles": [
+   "rainfall",
+   "display_only"
+  ],
+  "usefulness": "medium",
+  "aligned_equirect": "yes, 4096x2048 (exact 2:1)",
+  "integration_notes": "To use as a Project-R RAINFALL input: after decoding to [0,1] shadow index, INVERT it (rainfall_proxy = 1 - shadow_index) and write as a single-channel grayscale PNG. Apply the ocean sentinel mask to set ocean pixels to a neutral mid-value (e.g. 0.5) or zero depending on whether coastal runoff should be suppressed. Feed into the rainfall slot; Project-R resamples it to section resolution automatically. This is a secondary option \u2014 if a direct absolute-rainfall map exists in the export (e.g. Rainfall.png or Precipitation.png), prefer that; use RainShadow only if no direct rainfall map is available or to modulate a flat rainfall field spatially. Could also serve as a DISPLAY_ONLY overlay on the preview sphere to help the user select rain-shadow terrain sections.",
+  "caveats": "This is a derived orographic-reduction field, not absolute precipitation \u2014 it captures where mountains dry out air masses, not total rainfall. Viridis low end (purple) and the ocean sentinel (dark grey [30,30,30]) are visually very similar at small display sizes; be careful not to confuse them when masking. The 8-bit depth gives only 256 viridis steps, which is adequate for a rainfall weight but not for fine precipitation modelling. Check the export for a sibling Rainfall.png or Precipitation.png \u2014 if present, that map is directly usable and makes this one redundant as an erosion driver (keep it only for display or cross-validation).",
+  "confidence": "high"
+ },
+ {
+  "name": "RockType",
+  "represents": "Geological rock-type / lithology classes across landmasses; ocean is a single near-black fill color (not a data class)",
+  "encoding": "categorical_palette",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "The analyzer reports 67 unique RGB colors, but visually this is clearly a ~15-20 class categorical map; the extra colors are JPEG/PNG compression fringing at blob edges. Decode steps: (1) Collect all unique RGB triplets, discard any with count < 0.005 * total_pixels as fringe noise. The surviving set is the true palette (~15-20 entries). (2) Map every pixel to its nearest palette entry by minimum Euclidean RGB distance. (3) Assign class IDs 0..N-1 to the palette entries. Class for RGB\u2248(2,3,33) and its near-black ocean variants (\u2248(1,3,28), (2,3,38), (2,4,42)) = ocean / no-data mask, class ID 0. (4) Remaining classes are distinct rock types \u2014 assign K_sp erodibility values heuristically or from Gleba documentation: bright lime-green, mid-green, dark-green blobs = likely vegetation-covered sedimentary (high K_sp); golden-yellow / tan = limestone or sandstone (high-medium); brown / dark-brown = igneous or laterite (medium-low); blue land patches = possible volcanic/basaltic (low); pink/mauve = metamorphic or salt (low); white = exposed quartzite or ice (very low). No in-image legend is present \u2014 class identity must come from Gleba generator source or accompanying metadata.",
+  "value_semantics": "Each pixel encodes one of ~15-20 discrete rock-type categories via a fixed color palette. Ocean / no-data = RGB\u2248(2,3,33), comprising 63% of pixels. No physical units; values are categorical labels, not a scalar field. No colorbar or legend is embedded in the image.",
+  "projectr_roles": [
+   "erodibility",
+   "section_selection",
+   "land_sea_mask"
+  ],
+  "usefulness": "medium",
+  "aligned_equirect": "yes \u2014 4096x2048 (2:1), matches the standard Gleba export resolution used by sibling maps",
+  "integration_notes": "Project-R does not currently consume this map, but it is the best candidate in the export set for a spatial erodibility field K_sp. Integration sketch: on section crop, resample the categorical layer (nearest-neighbor, never bilinear, to preserve class IDs) to the erosion grid resolution. Build a user-editable color->K_sp lookup table (default heuristic values above). Pass the K_sp grid into the stream-power erosion stage where currently K_sp is a single global scalar. The ocean class (\u2248RGB 2,3,33) also gives a clean land/sea mask as a free byproduct \u2014 could be used as the land_sea_mask role to replace the brightness-threshold approach. For section selection, the variety and patchiness of rock types is a useful proxy for geological interest; a future UI control could highlight regions with high lithological diversity.",
+  "caveats": "No in-image legend \u2014 class-to-rock-type mapping requires Gleba generator source or external documentation; without it the K_sp assignments are heuristic guesses. The 67 unique colors include compression fringe artifacts; nearest-color snapping to the true palette is mandatory before any class lookup. The ocean fill is not a uniform single color (four near-black variants visible in top_colors) so the sea mask must use a distance threshold (~15 RGB units from (2,3,33)) rather than an exact match. If a TileType or BiomeType sibling map exists in the same export, it may encode overlapping information (check for redundancy before building two separate erodibility pipelines). Nearest-neighbor resampling is critical \u2014 bilinear interpolation will create spurious intermediate colors that break the palette lookup.",
+  "confidence": "high"
+ },
+ {
+  "name": "SinksAndSources",
+  "represents": "Categorical flow-routing classification: ocean, land, flow sinks (topographic depressions where water cannot drain), flow sources (runoff origin points), and a fifth rare class \u2014 pre-computed hydrological network metadata for the planet generator's internal drainage solver",
+  "encoding": "categorical_palette",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "Exactly 5 discrete palette entries. Map each pixel by exact RGB match to class:\n  [0, 100, 150]   -> class 0: OCEAN        (75.19 % of pixels)\n  [80, 80, 80]    -> class 1: LAND         (21.74 %)\n  [100, 0, 150]   -> class 2: SINK         (1.86 %)   \u2014 drainage depression / coastal pit\n  [200, 0, 0]     -> class 3: SOURCE       (1.19 %)   \u2014 runoff source / spring point\n  [0, 200, 0]     -> class 4: RARE/UNKNOWN (0.02 %)   \u2014 extremely sparse, class uncertain\n\nUse nearest-color matching (L2 in RGB space) rather than exact match to be robust to any JPEG re-save artefacts (the file is PNG so exact match is safe here).",
+  "value_semantics": "No physical scalar units. Pure categorical labels produced by the Gleba planet generator's internal flow-routing pre-pass. Sinks mark depressions that were pit-filled or flagged; sources mark upstream headwater cells. No legend text visible in image. Ocean class aligns with the coastline geometry visible in companion maps.",
+  "projectr_roles": [
+   "land_sea_mask",
+   "informational"
+  ],
+  "usefulness": "low",
+  "aligned_equirect": "yes \u2014 4096x2048 (2:1), matches the standard Gleba export resolution",
+  "integration_notes": "Primary extraction: derive a binary LAND/SEA mask by isolating class 0 (OCEAN) pixels. This gives a clean coastline mask usable as the land_sea_mask extension slot in Project-R to define sea level more precisely than a brightness threshold on the heightmap. Implementation: load image, build boolean array (R==0) & (G==100) & (B==150) for ocean pixels, invert for land mask, save as single-channel uint8 PNG alongside the heightmap.\n\nThe sink/source annotation (classes 2 and 3) is NOT worth passing to Project-R's erosion pipeline: landlab's FlowAccumulator + DepressionFinderAndRouter already computes its own pit-filling and source detection from the heightmap directly. Importing the planet generator's pre-computed version would be redundant and potentially inconsistent after erosion modifies the surface.\n\nFor section-selection guidance the map adds little beyond what the world-color or heightmap already shows. Display-only use on the preview sphere is unattractive (5-color blocky image).",
+  "caveats": "The land/sea mask derivable here should be cross-checked against TileElevation or the world-color map's ocean regions \u2014 Gleba may define \"ocean\" with a slightly different coastline rasterization than the elevation zero-crossing. The rare green class (0.02%) is ambiguous; treat as LAND for masking purposes. This map carries no elevation, rainfall, or erodibility information and cannot substitute for any of the four primary Project-R inputs.",
+  "confidence": "high"
+ },
+ {
+  "name": "SoilDepth",
+  "represents": "Soil depth (regolith thickness) over land; black sentinel for ocean/no-data. Thin bright-yellow lines are river/drainage channels where soil thins to zero. Land values ramp from shallow (purple) to deep (yellow) following viridis.",
+  "encoding": "colormap_ramp:viridis",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "1. Mask out ocean sentinel: pixels where RGB == (30,30,30) or within ~2 DN of it are no-data (ocean). 2. For remaining land pixels: build the matplotlib viridis LUT (256 x 3 uint8 entries via `matplotlib.cm.get_cmap('viridis', 256)`). 3. For each land pixel find the nearest LUT entry by Euclidean distance in RGB space \u2192 index i in [0,255]. 4. Normalised soil depth = i / 255.0, in [0,1]. 5. No physical unit legend is visible; treat as relative depth only unless Gleba generator metadata supplies a max depth in metres. The analyzer confirms viridis: top non-ocean color is (254,231,36) which matches viridis index 255 to within 1 DN, and secondary cluster around (70,43,121) matches viridis index ~20.",
+  "value_semantics": "Black (30,30,30) = ocean / no data (~77% of pixels). Purple (viridis low end, index ~0) = shallow soil / bare bedrock. Bright yellow (viridis high end, index ~255) = deepest soil accumulation. Thin yellow filaments = river channels where soil is stripped to zero. No physical unit range is shown; value is a relative scalar in [0,1] after LUT inversion.",
+  "projectr_roles": [
+   "erodibility",
+   "land_sea_mask",
+   "informational"
+  ],
+  "usefulness": "medium",
+  "aligned_equirect": "yes \u2014 4096x2048 (2:1), same resolution as the other Gleba exports",
+  "integration_notes": "Not consumed by Project-R today. Two extension paths: (1) Spatial K_sp erodibility field \u2014 thin-soil / bedrock areas (low index) get lower K_sp (harder bedrock), deep-soil areas get higher K_sp (friable regolith); load as a per-pixel multiplier on the base erodibility constant in the stream-power step. (2) Land/sea mask \u2014 the (30,30,30) sentinel gives a clean binary land mask without needing a brightness threshold on the heightmap; could replace or cross-check the existing threshold approach. For either use: load with PIL, convert to float32, apply the viridis inverse-LUT to produce a [0,1] scalar array, then resample to section resolution with bilinear interpolation before passing to the erosion kernel.",
+  "caveats": "8-bit viridis encoding limits usable precision to ~256 levels; banding may appear in very flat soil-depth regions. No physical units or legend are visible \u2014 the [0,1] scalar is relative only unless the Gleba planet-generator config exposes a max_soil_depth parameter. The ocean sentinel (30,30,30) is not true black (0,0,0), so a strict zero-mask would miss it \u2014 use a threshold of < 35 in all channels. Soil depth encodes post-weathering regolith state, not rock hardness directly; the K_sp mapping is an approximation and should be validated against the TileElevation heightmap (deep soil tends to accumulate in topographic lows, so K_sp derived from this will partly mirror relief \u2014 consider whether that double-counts elevation information).",
+  "confidence": "high"
+ },
+ {
+  "name": "SoilPermeability",
+  "represents": "Soil permeability (hydraulic conductivity / infiltration rate) over land \u2014 how readily water passes through the soil column. Higher values (yellow) = more permeable; lower values (purple/blue) = impermeable or clay-rich soils. Ocean cells are masked with a near-black sentinel.",
+  "encoding": "colormap_ramp:viridis",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "1. Build the matplotlib viridis LUT: `import matplotlib.cm as cm; lut = (cm.get_cmap('viridis', 256)(range(256))[:, :3] * 255).astype(np.uint8)` (shape 256x3).\n2. Mask ocean/no-data: pixels where max(R,G,B) <= 32 are ocean sentinel (~(30,30,30)); set those to NaN.\n3. For remaining land pixels: for each pixel RGB, find nearest LUT entry by Euclidean distance in RGB space \u2192 index i in [0,255].\n4. Normalized permeability = i / 255.0, range [0,1], where 0 = minimum permeability (dark purple) and 1 = maximum permeability (bright yellow).\n5. No physical units are recoverable from the image (no legend/colorbar visible); treat as a dimensionless [0,1] scalar.",
+  "value_semantics": "Black/near-black (30,30,30) = ocean/no-data mask (~77% of pixels). Yellow (254,231,36) = highest permeability (~3.7% of pixels, concentrated at coastlines and shallow-soil areas). Purple/blue = lowest permeability (impermeable clay/rock). Green/cyan = intermediate. No physical units visible; scalar is normalized [0,1].",
+  "projectr_roles": [
+   "none"
+  ],
+  "usefulness": "low",
+  "aligned_equirect": "yes \u2014 4096x2048, confirmed 2:1 aspect ratio, pixel-aligned with other Gleba exports",
+  "integration_notes": "Project-R has no current slot for permeability. The physically meaningful extension would be as an inverse runoff-concentration modifier feeding into the K_sp erodibility field: high permeability \u2192 water infiltrates \u2192 less overland flow \u2192 lower effective stream power \u2192 reduce K_sp locally. This is a second-order correction; it is not a direct erodibility proxy. If implemented, decode to [0,1] scalar, invert (1 - permeability_norm) to get relative runoff fraction, then multiply by a base K_sp to get spatial erodibility. Load alongside the heightmap section crop, resample to erosion grid resolution (typically much coarser). Ocean mask must be applied before any resampling to avoid bleeding sentinel values into coastal land cells.",
+  "caveats": "The analyzer failed to identify viridis because 77% of pixels are the near-black ocean sentinel (30,30,30), which skews the colormap fit; visual inspection confirms viridis clearly. No legend is present so physical units (e.g. mm/hr, m/day) are unknown \u2014 only relative values are recoverable. Permeability is not the same as rock erodibility (K_sp): permeable soils reduce runoff but may erode easily once saturated. Overlaps conceptually with any soil-type or geology map in the same export set; check for a SoilType or RockType sibling before implementing, as those may carry the same information in a more actionable form. 8-bit encoding limits scalar precision to ~256 levels after LUT inversion.",
+  "confidence": "high"
+ },
+ {
+  "name": "SoilRichness",
+  "represents": "Soil fertility / nutrient richness over land areas of the Gleba planet. Ocean and no-data pixels are flat near-black. Bright yellow-green patches mark the most fertile soil; dark blue-purple marks the least fertile land. Thin white branching lines baked into the ramp layer are the game's river-network overlay.",
+  "encoding": "colormap_ramp:viridis",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "1. Ocean/null mask: any pixel with all three channels <= 35 (the flat RGB ~[30,30,30] background that covers 77% of the image) is ocean \u2014 set to NaN or 0.\n2. For land pixels: build the matplotlib viridis LUT at 256 steps (import matplotlib.cm; lut = (matplotlib.cm.viridis(np.linspace(0,1,256))[:,:3]*255).astype(np.uint8)). For each land pixel, find the nearest LUT entry by Euclidean RGB distance; its index / 255 gives normalized soil richness in [0, 1]. (The automated cmap fit was inconclusive \u2014 cubehelix mean_err 0.121 was best but coverage only 44%. Visual inspection strongly matches viridis: dark-purple low end through cyan to yellow-green high end.)\n3. No legend or physical units are visible in the image. The scalar is a dimensionless game-engine fertility value.",
+  "value_semantics": "Black (RGB ~30,30,30) = ocean / no data (77% of pixels). Dark purple-blue = low soil richness (low index). Cyan-teal = mid richness. Yellow-green = maximum richness (high index). Physical range unknown; scalar is a game-internal [0,1]-ish fertility score. White/near-white thin branching lines on land are river network artifacts baked into the same layer.",
+  "projectr_roles": [
+   "display_only",
+   "section_selection"
+  ],
+  "usefulness": "low",
+  "aligned_equirect": "yes \u2014 4096x2048, exact 2:1, consistent with the other Gleba exports",
+  "integration_notes": "No direct slot in Project-R's current pipeline. The most defensible use is section-selection guidance: overlay it on the preview sphere so a user can pick a fertile-looking region to erode. As an erodibility (K_sp) proxy it is a significant semantic stretch \u2014 soil richness in a game engine has no calibrated relationship to rock erodibility. If someone did want to wire it in as K_sp, load it, apply the viridis inverse LUT to get [0,1], apply the ocean mask, and feed into the erodibility spatial field slot once that extension is built. More practically, it is a useful world-map layer alongside the color/biome map for display on the sphere.",
+  "caveats": "1. River network lines (white/bright streaks) are baked into the ramp layer \u2014 they will appear as false high-richness spikes if used as a data field; mask or blur before any numeric use. 2. 8-bit only; 580 unique colors after the viridis ramp is sampled sparsely across the dynamic range, so banding will be visible if upscaled or used as a smooth field. 3. Colormap identification is low-confidence (best automated fit mean_err 0.121); if the game uses a custom LUT the decoded scalar will be nonlinearly distorted. 4. Semantically distant from any erosion parameter \u2014 do not confuse with a rainfall or moisture map even though the visual palette and land-coverage pattern are superficially similar.",
+  "confidence": "medium"
+ },
+ {
+  "name": "SoilTexture",
+  "represents": "Discrete soil texture classes (sandy, clayey, silty, mixed etc.) for Gleba's land areas; ocean/no-data is black background",
+  "encoding": "categorical_palette",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "1. Define anchor class colors from visual read and top_colors:\n   - ID 0 (ocean/no-data): RGB(30, 30, 30)  \u2014 77% of pixels\n   - ID 1 (soil class A, bright green): RGB(12, 205, 37)\n   - ID 2 (soil class B, red): RGB(253, 0, 0)\n   - ID 3 (soil class C, olive/gray-green): RGB(87, 99, 68)\n   - ID 4 (soil class D, blue-purple): visually ~RGB(80, 80, 180) \u2014 read remaining distinct blobs\n2. For each pixel: assign class = argmin Euclidean distance in RGB space to the anchor set.\n3. Ocean mask: class 0 (or threshold all channels < 40).\n4. To drive K_sp: map class IDs to erodibility scalars, e.g. sandy=high, clay=low, silt=medium.\nNote: boundaries between classes are softly blended (hence 29 848 unique colors despite ~5 discrete classes). Nearest-centroid in RGB gives clean class boundaries.",
+  "value_semantics": "No physical units or legend present in the image. Colors represent game-engine-defined soil texture categories. Black (RGB ~30,30,30) = ocean or no-data. Bright green, red, olive-gray, and blue-purple blobs each map to a distinct soil type. No quantitative range is encoded \u2014 this is a class label map, not a scalar ramp.",
+  "projectr_roles": [
+   "none"
+  ],
+  "usefulness": "low",
+  "aligned_equirect": "yes \u2014 4096x2048 (2:1), standard Gleba export resolution, pixel-aligned with sibling heightmap exports",
+  "integration_notes": "No current Project-R slot. The only viable extension use is as a spatial erodibility field: map each soil class to a K_sp multiplier (sandy = ~1.5x baseline, clay = ~0.5x, silt = ~1.0x) and resample the class raster to the section grid before the stream-power erosion step. This would require adding a K_sp input slot to the erosion operator. For now it is display-only context at best. It could also guide section selection (pick regions with diverse soil texture for richer erosion outcomes), but that is manual UX, not a data driver. Do not confuse with a rock-type/geology map \u2014 this is soil surface texture, which affects surface erodibility, not bedrock incision resistance.",
+  "caveats": "Analyzer flagged categorical_candidate: false due to 29 848 unique colors, but those are all boundary-blend interpolations between ~5 true classes \u2014 the map is genuinely categorical. No legend is embedded; class-to-soil-type mapping must be inferred from Gleba planet generator documentation or by correlating color against known biome/elevation regions. The analyzer's colormap fits (cubehelix etc.) are meaningless here \u2014 this is not a ramp. Redundancy: if a geology or rock-type map is present in the export set, that is a stronger erodibility driver than soil texture.",
+  "confidence": "high"
+ },
+ {
+  "name": "TectonicMicroplates",
+  "represents": "Tectonic microplate segmentation \u2014 each irregular blob is one microplate, color is an arbitrary categorical label (plate ID), not a scalar quantity",
+  "encoding": "categorical_palette",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "The image is a categorical label map with JPEG-style anti-aliasing at plate boundaries, producing ~1711 apparent unique colors from what are ~100-300 true plate colors. To decode: (1) Load as uint8 RGB. (2) Erode each channel by a 5px disk kernel to strip boundary-bleed pixels, setting boundary pixels to a sentinel (e.g. [0,0,0]). (3) Cluster the non-sentinel pixels with k-means (k=200-400, or use DBSCAN on RGB space) to recover the true plate palette. (4) Assign every pixel (including uneroded ones) to its nearest cluster centroid by L2 distance in RGB space. Result: integer plate-ID array [0..N-1]. No colormap LUT inversion is needed \u2014 colors carry no ordinal meaning, they are purely nominal IDs. To assign scalar properties (uplift U or erodibility K_sp) to plates: build a plate_id -> value lookup table manually or from auxiliary metadata; then remap the ID array through that LUT.",
+  "value_semantics": "No physical units encoded in color. Each distinct color = one microplate label. Color hue is arbitrary (orange-brown cluster ~15% of map, blue-purple cluster ~15%, remainder scattered across hue wheel). No legend or colorbar present. Min/max luminance (39-216) reflects color variety, not elevation or any scalar field.",
+  "projectr_roles": [
+   "uplift",
+   "erodibility",
+   "section_selection"
+  ],
+  "usefulness": "medium",
+  "aligned_equirect": "yes \u2014 4096x2048, confirmed 2:1, pixel-aligned with the standard Gleba export grid",
+  "integration_notes": "Project-R has no current slot for this map. Best extension uses: (1) Spatial uplift field U \u2014 plate boundaries (detected as pixels where nearest-plate-ID differs from any neighbor after decoding) are orogenic zones; assign high U to boundary pixels, low U to plate interiors, with optional per-plate age/type variation. (2) Spatial erodibility K_sp \u2014 assign different rock hardness per plate class (e.g. oceanic crust plates softer than continental cratons). (3) Section-selection guidance \u2014 display on the preview sphere so users can deliberately pick cross-boundary sections to get mountain-range terrain. Implementation: after decode step above, Project-R crops the plate-ID raster to the section rect (same crop/projection pipeline as the heightmap), then maps IDs to a float32 K_sp or U field via a user-editable lookup table in the addon UI.",
+  "caveats": "Anti-aliasing at plate boundaries means naive unique-color counting gives 1711 colors rather than the true plate count \u2014 clustering is required before any categorical use. Plate colors are arbitrary nominal labels; no information is embedded about plate type, age, velocity, or rock type \u2014 any physical property assignment must come from external metadata or user input. The map depicts microplates (hundreds of small cells) rather than the ~15 major Earth-scale plates, so boundary density is very high and boundary-uplift zones will cover a large fraction of any section. No land/sea distinction is encoded here \u2014 ocean and continental plates are mixed indistinguishably. Check sibling exports for a dedicated geology or crust-age map that may carry richer physical information for the same purpose.",
+  "confidence": "high"
+ },
+ {
+  "name": "TectonicPlates",
+  "represents": "Tectonic plate segmentation \u2014 each distinct color identifies one rigid lithospheric plate. 16 plates total, covering the full globe with no gaps (ocean and continental crust both labeled).",
+  "encoding": "categorical_palette",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "Build a 16-entry palette table from the top_colors list (exact RGB values: e.g. [202,113,2], [227,159,67], [30,214,90], [2,190,131], [223,82,172], [53,173,58], [31,57,215], [100,9,244], [8,165,139], [135,41,153], [26,42,110], [221,216,174], plus the remaining 4 minor colors). For each pixel, find the nearest-color entry in the palette (Euclidean RGB distance) and assign its 0-based plate_id (0\u201315). Output is a uint8 label image. Colors carry no scalar meaning \u2014 they are arbitrary plate identifiers only. No colormap LUT needed.",
+  "value_semantics": "Each pixel value after decoding is an integer plate ID in [0, 15]. No physical units. The largest plate (ID mapped to RGB [202,113,2], burnt orange) covers ~29% of the globe. There is no intrinsic ordering \u2014 IDs are nominal, not ordinal.",
+  "projectr_roles": [
+   "uplift",
+   "section_selection"
+  ],
+  "usefulness": "medium",
+  "aligned_equirect": "yes, 4096x2048 (2:1 aspect confirmed)",
+  "integration_notes": "Project-R does not consume this map directly. Two extension paths: (1) UPLIFT driver U \u2014 compute a plate-boundary mask (dilate each plate label map, XOR adjacent-plate pixels), then apply a distance transform to produce a continuous \"proximity to plate boundary\" scalar in [0,1]; feed that into the K_sp/U slot. Convergent vs divergent boundary type cannot be inferred from this map alone without a separate velocity or boundary-type export. A simple all-boundary proxy still gives geologically plausible orogeny at the correct locations. (2) SECTION SELECTION guidance \u2014 plate boundaries define geologically interesting regions to crop; a UI overlay highlighting boundary zones could help the user pick sections with active mountain-building. Do NOT use as a world_map display layer \u2014 the arbitrary rainbow palette would be confusing to the end user. To implement uplift: load label image, build adjacency mask (scipy.ndimage label or skimage), distance-transform from boundary pixels, normalize, write as float32 greyscale PNG aligned to the heightmap.",
+  "caveats": "Colors are arbitrary and may vary between Gleba export runs \u2014 do not hardcode the palette; always re-derive it from the actual file. No boundary-type information (subduction vs rift vs transform) is encoded, so uplift magnitude cannot be differentiated by boundary type without additional exports. The 16-plate count covers both oceanic and continental crust with no distinction, which limits geological specificity. Check whether a companion CrustType or OceanicCrust map exists in the export to disambiguate continental vs oceanic plates \u2014 that combination would improve erodibility and sea-level masking significantly.",
+  "confidence": "high"
+ },
+ {
+  "name": "TileElevationColorSmooth",
+  "represents": "Elevation rendered as a custom hypsometric tint (multi-stop color ramp): deep ocean = dark navy, ocean = mid-blue, shallow/shelf = cyan-blue, lowland = green, mid-elevation = yellow-green/cream, high elevation = tan/orange, peaks = dark brown/near-black, polar snow/ice caps = white-gray. Smoothed interpolation applied (vs the raw tile-grid version).",
+  "encoding": "colormap_ramp:custom_hypsometric",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "This is a custom hypsometric tint palette specific to the Gleba generator \u2014 not a standard matplotlib colormap (analyzer returned likely_colormap=null; best cmap fit RdBu mean_err=0.097 is too poor to trust for inversion). Do NOT recover elevation from this image. For display-only use: load as sRGB, no transform. If approximate elevation recovery is unavoidable, build a manual LUT from the visual breakpoints: (9,56,96) = ocean floor/min, mid-blues (~30,80,140) = ocean, (~30,160,180) = shallow, (~60,160,80) = lowland, (~180,200,120) = mid, (~220,180,100) = high, (~160,80,30) = very high, (~30,10,10) = peak, (220,230,240) = polar \u2014 map each pixel to nearest LUT entry to get a rank; rescale to physical elevation range if known. Error will be substantial. Use TileElevation grayscale sibling for real elevation data.",
+  "value_semantics": "Black/dark-navy = lowest (deep ocean), white/light-gray = highest (polar caps or peaks). No numeric units encoded; the colormap is aesthetic, not calibrated to metres. The full dynamic range spans deep-ocean trench depth to mountain peaks. No legend visible in the image.",
+  "projectr_roles": [
+   "world_map",
+   "display_only"
+  ],
+  "usefulness": "medium",
+  "aligned_equirect": "yes \u2014 4096x2048 (2:1), pixel-aligned with the other TileElevation* siblings",
+  "integration_notes": "Load directly into the WORLD MAP slot (sRGB, no decoding). It is visually attractive and will render well on the preview sphere \u2014 the hypsometric tint gives the user immediate land/sea/mountain context when picking a section. No further transform needed. Do not wire into the HEIGHTMAP slot; use the companion grayscale TileElevation export instead (16-bit preferred). If no grayscale sibling is available, a rough land_sea_mask could be extracted by thresholding the blue channel (B gt 130 and G lt 100 as a rough ocean test), but that is fragile near coastal shelves and should be a fallback only.",
+  "caveats": "1. Redundant with TileElevation grayscale sibling(s) for elevation data \u2014 this image encodes the same field as color, not scalar brightness. 2. Custom palette means color-to-elevation inversion requires the generator's internal LUT; any approximation will have large errors especially in the mid-range green and blue transition zones. 3. 8-bit only \u2014 fine for display but eliminates precision needed for heightmap use. 4. The \"Smooth\" suffix indicates interpolation/antialiasing applied; coastline pixels blend ocean and land colors making binary masking ambiguous. 5. Several TileElevation* variants likely exist in the export (raw, smooth, color, grayscale) \u2014 this is the display variant, lowest priority for data extraction.",
+  "confidence": "high"
+ },
+ {
+  "name": "TileElevationColorSmoothIceAge",
+  "represents": "Full-planet hypsometric tint combining land elevation, ocean bathymetry, and ice-age polar ice extents, rendered with a custom Earth-style multi-segment color ramp",
+  "encoding": "colormap_ramp:custom_hypsometric",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "Load as sRGB RGB \u2014 no scalar extraction. This is a display-only map. The color encodes elevation via a custom multi-segment hypsometric LUT that is not invertible to a usable scalar field: the best matplotlib fit (RdBu, mean_err=0.094) is far too poor for reliable inversion. Color segments observed: dark navy [9,56,95] = deep ocean; medium blue [11-12,63-65,107-110] = mid-ocean; light cyan [215,255,255] (dominant, 19.5%) = shallow shelf and polar sea ice; white [255,255,255] = glaciated peaks and polar ice sheets; green tones = vegetated lowlands; tan/beige = mid-elevation plains; brown/red-brown = high terrain. If elevation scalars are needed, use the companion grayscale TileElevation* map instead.",
+  "value_semantics": "Qualitative color only \u2014 no numeric units recoverable without the generator's exact LUT. Visual range: deep ocean (darkest blue) through bathymetric gradient to shoreline, then land from sea-level green through tan plains to brown highlands to white mountain peaks. The ice-age variant adds expanded polar ice sheets (white/gray/light-blue) across both polar strips (~top 8% and bottom 12% of the image). No legend or colorbar visible in the image.",
+  "projectr_roles": [
+   "world_map",
+   "display_only"
+  ],
+  "usefulness": "high",
+  "aligned_equirect": "yes \u2014 4096x2048, confirmed 2:1 aspect, pixel-aligned with the heightmap family",
+  "integration_notes": "Slot directly as the WORLD MAP texture on the Blender preview sphere (sRGB, load as-is, no decode step). This is the most visually informative of the elevation color variants: land/ocean contrast and terrain relief are immediately readable, giving the user strong geographic context when drawing a section. The IceAge ice extents clearly mark the polar regions, which helps users avoid selecting heavily ice-distorted polar sections. Do NOT feed into the heightmap, rainfall, or bathymetry slots \u2014 a companion grayscale TileElevation map must supply actual elevation data. Potential extension: a land/sea threshold applied to this image's blue-vs-non-blue pixels could approximate a land/sea mask, but a dedicated binary mask map is far cleaner if available.",
+  "caveats": "(1) 8-bit RGB only \u2014 zero elevation precision; the companion grayscale TileElevation* map is required for all data-driven erosion inputs. (2) IceAge variant \u2014 polar ice sheets are larger than in the non-IceAge sibling (TileElevationColorSmooth); pick whichever matches the intended world epoch and use the same epoch consistently across all map slots. (3) Custom hypsometric LUT is not a standard matplotlib colormap, making scalar inversion impractical \u2014 do not attempt to reconstruct elevation from pixel color. (4) The dominant color [215,255,255] at 19.5% of pixels spans both polar ice and shallow-water shelves \u2014 confirms the ramp is multi-segment and non-monotone, reinforcing that scalar recovery is unreliable. (5) Redundant with TileElevationColorSmooth (non-ice-age sibling) \u2014 only one is needed as the world map; the other is informational.",
+  "confidence": "high"
+ },
+ {
+  "name": "TileElevationColorSmoothNoIce",
+  "represents": "Hypsometric-tint elevation visualization of the Gleba planet surface \u2014 elevation encoded as a continuous color ramp applied to smoothed terrain, with no polar-ice overlay. Dark navy = deep ocean, blue = shallows, cyan = coastal/very-shallow, green = lowland, yellow-white = plateau/upland, red-brown = high mountains, near-black = extreme peaks.",
+  "encoding": "colormap_ramp:custom_hypsometric",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "This is a display-only RGB render of elevation using a custom hypsometric LUT \u2014 NOT a standard matplotlib colormap (best cmap fit is gist_earth at mean_err 0.137, which is too loose to invert reliably). Do NOT attempt luminance-based extraction. To recover scalar elevation, use the sibling single-channel TileElevation grayscale map instead. If this map must be decoded: (1) obtain the exact Gleba planet-generator hypsometric LUT (256-entry RGB table); (2) for each pixel, find nearest LUT entry by Euclidean distance in RGB space; (3) use that index/255 as the normalized elevation in [0,1]; (4) rescale to physical units if the planet's elevation range is known. Without the exact LUT this will produce artefacts \u2014 use the grayscale sibling.",
+  "value_semantics": "No legend embedded in the image. Color ramp runs: deep navy (RGB ~9,57,96, ~47% of pixels = deep ocean floor) through blue (shallow ocean), cyan (coastal shallows), green (lowland), yellow-white (plateaus), red (high terrain), dark brown/near-black (peak elevations). Absolute elevation range unknown from this file alone \u2014 infer from sibling grayscale heightmap. The \"Smooth\" tag implies low-frequency elevation smoothing was applied before colorizing; fine relief detail is reduced relative to raw TileElevation.",
+  "projectr_roles": [
+   "world_map",
+   "display_only"
+  ],
+  "usefulness": "medium",
+  "aligned_equirect": "yes \u2014 4096x2048 (2:1), standard equirectangular, pixel-aligned with sibling TileElevation maps",
+  "integration_notes": "Load directly as the WORLD MAP slot (sRGB, decoded as-is). It gives the preview sphere a visually informative Earth-like appearance that lets the user immediately identify continents, ocean basins, and mountain chains when picking a section. No color-space transform needed \u2014 treat as display RGB. Do NOT use as heightmap input; the custom hypsometric ramp cannot be cleanly inverted. Wire the grayscale TileElevation sibling into the HEIGHTMAP slot instead. At 4096x2048 it will load efficiently and downsample well for the sphere preview.",
+  "caveats": "1. Redundancy: this is purely a visual derivative of the TileElevation data \u2014 it adds no independent information beyond what the grayscale heightmap already captures. 2. \"Smooth\" variant: elevation has been low-pass filtered, so fine topographic detail is suppressed compared to an unsmoothed TileElevation \u2014 do not attempt to invert it for erosion seeding. 3. \"NoIce\" variant: a companion with-ice variant may exist; for worlds with polar ice caps the iced version may look more realistic on the preview sphere, but for erosion purposes the NoIce surface is the correct land-surface input. 4. Only 1779 unique colors despite 8 MP \u2014 heavy color quantization from 8-bit LUT; elevation recovered from this would have coarse banding (~256 levels max). 5. The custom hypsometric ramp is not a named standard colormap so automated LUT-inversion pipelines cannot be applied without the generator's palette table.",
+  "confidence": "high"
+ },
+ {
+  "name": "TileElevationGreyscale",
+  "represents": "Planet surface elevation \u2014 continuous scalar field, darker = lower (ocean floor / sea), lighter = higher (land / mountains)",
+  "encoding": "grayscale_continuous",
+  "channels_bitdepth": "1ch 16-bit grayscale (PIL mode I;16, uint16), 4096x2048",
+  "decode_recipe": "Open with PIL in mode I;16 (or equivalent 16-bit loader). Cast to float32/float64. Divide by 65535.0 to get normalized elevation in [0, 1]. Multiply by max_elevation_m to recover metres (no legend visible; assume ~8000\u201310000 m for earthlike scale, or calibrate against a sibling TileElevation map that carries a physical range). Black (value ~0) = deepest ocean / minimum; near-white (max observed 53015/65535 \u2248 0.809) = highest peaks. No colormap inversion needed \u2014 luminance is monotonically proportional to elevation.",
+  "value_semantics": "uint16 0 = minimum elevation (ocean floor / datum); uint16 53015 (observed max, ~81% of range) = highest terrain; mean ~23095 (~35% of range). frac_zero 0.09% \u2014 almost no true-zero pixels, so ocean floor sits slightly above 0. 35765 unique levels: genuine continuous 16-bit precision throughout. No physical unit legend visible in the image.",
+  "projectr_roles": [
+   "heightmap"
+  ],
+  "usefulness": "high",
+  "aligned_equirect": "yes \u2014 4096x2048 (2:1), standard Gleba export resolution. Pixel-aligned with sibling exports in the same folder.",
+  "integration_notes": "Load directly into Project-R's heightmap slot. Decode: `elev = (np.array(Image.open(path), dtype=np.float32)) / 65535.0 * max_elev_m`. Sea level threshold: inspect the bimodal histogram (major ocean peak bins 3\u20134 \u2192 uint16 ~12000\u201320000; land peak bins 7\u20138 \u2192 ~28000\u201336000); a threshold around uint16 24000\u201326000 cleanly separates ocean from land and can derive a land/sea mask if no dedicated mask map is present. The sharp black coastline outlines visible in the image (1\u20132 px wide, value near 0) are artefacts of the planet generator; consider a small morphological dilation or median filter at the coastline before feeding to stream-power erosion, or they will seed spurious deep incision channels exactly at the shore.",
+  "caveats": "1) Physical elevation range unknown (no legend): max_elev_m must be set by the user or inferred from a companion map. 2) Thin black coastline-outline artefacts (~1-2 px) at every land/sea boundary \u2014 these are not real troughs and will create erosion artefacts if unmasked. 3) The Gleba export folder likely contains multiple TileElevation* variants (colour-shaded, colourmap, etc.); this greyscale 16-bit version is the authoritative data source \u2014 the coloured siblings are display-only and should not be used as a heightmap instead. 4) The 8-bit top_colors readout (99.89% white) is a PIL I\u2192RGB scaling artefact and does not reflect actual pixel distribution \u2014 trust n_unique_levels and lum_hist16 instead.",
+  "confidence": "high"
+ },
+ {
+  "name": "TileElevationGreyscaleBathymetry",
+  "represents": "Combined land elevation + ocean-floor bathymetry encoded as a single 16-bit grayscale scalar field; brighter = higher land, mid-gray = shallower/deeper ocean floor, black = deepest ocean",
+  "encoding": "grayscale_continuous",
+  "channels_bitdepth": "1ch 16-bit grayscale, 4096x2048",
+  "decode_recipe": "1. Open with PIL in mode I;16 or numpy as uint16 \u2014 do NOT convert to 8-bit first. 2. Raw pixel v in [0, 65535]. No colormap; value is the scalar directly. 3. Determine sea-level threshold: the histogram has a gap around bin 6 (~24576-28672) with only 112 k pixels, then a large ocean-floor peak in bins 7-9 (~29k-41k). Sea level sits near v = 28672 (44% of 65535) \u2014 cross-check against TileElevationGreyscale (land-only sibling) or a land-mask map to pin it precisely. 4. Land pixels (v > sea_level_v): elevation_m = (v - sea_level_v) / (65535 - sea_level_v) * max_land_elev_m. 5. Ocean pixels (v <= sea_level_v): depth_m = (sea_level_v - v) / sea_level_v * max_ocean_depth_m. 6. For Project-R heightmap slot, use v/65535 directly (brightness = relative elevation across full range) and set sea-level fraction accordingly in the addon.",
+  "value_semantics": "v=65535 (white) = highest land peak; v=0 (black) = deepest ocean trench; sea level approximately at v~28672-32768 (needs calibration). Mean v=45488 (~69% of max) reflects land-heavy / high-plateau planet. frac_zero=0.09% means almost no pixels are at absolute minimum \u2014 deep ocean is sparse. 40135 unique 16-bit levels confirms full-precision continuous data, not quantized.",
+  "projectr_roles": [
+   "heightmap",
+   "bathymetry"
+  ],
+  "usefulness": "high",
+  "aligned_equirect": "yes \u2014 4096x2048, exact 2:1",
+  "integration_notes": "HEIGHTMAP slot: load as uint16 numpy array, pass v/65535 as the elevation field. This is the preferred heightmap input \u2014 16-bit gives 40k+ unique levels, avoiding the banding that would afflict an 8-bit grayscale. BATHYMETRY slot: extract ocean pixels (v less than sea_level_v), remap (sea_level_v - v) / sea_level_v to [0,1] so white = deepest, then supply to the continental-shelf/sea-floor pass. One file thus fills both slots. Recommended extension: derive a land/sea binary mask at the same sea-level threshold to feed a future LAND_SEA_MASK slot, avoiding a brightness-threshold approximation.",
+  "caveats": "1. The visual shows thin black coastline/plate-boundary outlines drawn into the pixel data; these will appear as artificial sharp trenches in eroded output \u2014 compare against TileElevationGreyscale to check if that sibling lacks them. 2. Sea-level threshold is not labeled anywhere in the file; must be inferred from the histogram valley or diffed against a land-only sibling. 3. The 8-bit projection collapses to only 31 distinct levels and shows 99.89% white \u2014 always load as 16-bit uint16 or information is destroyed. 4. Bimodal histogram (ocean-floor cluster in bins 7-9, land cluster in bin 15) is characteristic of combined elevation+bathymetry encoding; do not treat as a pure land heightmap without handling the sub-sea-level range separately. 5. Redundant with TileElevationGreyscale \u2014 that sibling likely has ocean at a flat value; use this one when bathymetry depth matters, the other when a clean zero-ocean surface is preferred for erosion seeding.",
+  "confidence": "high"
+ },
+ {
+  "name": "TileElevationGreyscaleLand",
+  "represents": "Land surface elevation only; ocean pixels are hard-zeroed (masked out). Encodes terrain height above sea level for continental landmasses. The near-white fringe at coastlines is the transition from zero ocean to elevated terrain.",
+  "encoding": "grayscale_continuous",
+  "channels_bitdepth": "1ch 16-bit grayscale (PIL mode I;16, uint16), 4096x2048",
+  "decode_recipe": "1. Open with PIL in mode 'I' (16-bit). 2. Convert to numpy uint16 array, shape (2048, 4096). 3. Normalize: elev_norm = pixel_value / 65535.0 \u2014 gives [0, 1] relative elevation. 4. Ocean mask: land_mask = (pixel_value > 0). Zero pixels are ocean and must be treated as sea level (not zero elevation on land). 5. To recover physical elevation in metres, multiply elev_norm by the planet's max elevation (unknown from file alone; use the companion TileElevation metadata or treat max raw value 40496/65535 \u2248 0.617 as the ceiling and scale accordingly). No colormap inversion needed \u2014 it is a direct linear grayscale.",
+  "value_semantics": "min=0 (ocean, masked); max=40496 raw uint16 (highest peak, ~61.7% of the 16-bit ceiling). mean=702 raw (low because 77.2% of pixels are ocean zeros). Brighter = higher elevation. No embedded legend; physical units (metres) are unknown without the planet generator's elevation scale parameter.",
+  "projectr_roles": [
+   "heightmap",
+   "land_sea_mask"
+  ],
+  "usefulness": "high",
+  "aligned_equirect": "yes \u2014 4096x2048 (exactly 2:1); matches the standard Gleba export resolution",
+  "integration_notes": "Primary heightmap slot: load as uint16, normalize to [0,1] by dividing by 65535 (or by 40496 to stretch land range to full [0,1]). Feed directly into the section crop + Hammer projection pipeline. The zero-ocean mask is a free bonus: derive land_sea_mask via `pixel_value > 0` \u2014 use this to seed the coastal erosion stage's shoreline boundary rather than computing a brightness threshold. Because ocean cells are zero and indistinguishable from flat sea-level land, do NOT run stream-power erosion across the whole raster without first applying the land mask; otherwise flat zero-ocean regions will generate spurious drainage. Clip eroded output back to the land mask before reassembly. This map does not carry bathymetry \u2014 pair with a companion TileElevation (full, non-Land) or a dedicated bathymetry export for the sea-floor/continental-shelf pass.",
+  "caveats": "1. Ocean-zeroed: cannot drive the bathymetry slot; the full TileElevationGreyscale (without the Land suffix) is the better choice if it exists in the export, as it should contain sub-sea-level depth values. 2. Physical scale unknown: max raw value 40496 does not map to a known metre ceiling without the generator's metadata; erosion calibration (K_sp, U units) will need a manual scale guess or the metadata file. 3. 77.2% zero pixels mean histogram statistics are dominated by ocean; do not use the image mean/std for normalization without first masking ocean. 4. 16-bit PNG is ideal for erosion (no 8-bit banding), but verify the loader actually reads in 16-bit mode \u2014 PIL's default Image.open() may silently downcast to 8-bit; use Image.open().convert('I') or rawarray mode explicitly.",
+  "confidence": "high"
+ },
+ {
+  "name": "TileSlope",
+  "represents": "Terrain surface slope magnitude (steepness), derived from the elevation field. Ocean/flat pixels are flagged with a sentinel gray; land pixels ramp through the viridis colormap from low slope (purple) to high slope (cyan/teal at the visible maximum).",
+  "encoding": "colormap_ramp:viridis",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "1. Build the matplotlib viridis LUT: `lut = (plt.get_cmap('viridis')(np.linspace(0,1,256))[:,:3]*255).astype(np.uint8)` \u2014 shape (256,3). 2. Create an ocean/no-data mask: pixels where all(|ch - 30| <= 3) are masked out (77% of image; they are a sentinel that does not sit on the viridis ramp). 3. For each unmasked pixel, find nearest LUT entry by L2 distance in RGB space -> index i in [0,255]. slope_normalized = i / 255.0, range [0,1] (0 = flat land, 1 = steepest slope visible in the dataset). 4. Physical units are not recoverable from the image (no legend/colorbar present); treat as a dimensionless slope proxy. Note: only the lower ~40-50% of the viridis ramp appears to be used (purple through cyan); no yellow/green end is visible, so maximum slopes are moderate.",
+  "value_semantics": "Sentinel [30,30,30] = ocean or zero-slope (no data). Land pixels: viridis index 0 (purple, ~[68,1,84]) = lowest slope; viridis index ~120-130 (cyan/teal) = highest slope in this export. No physical units (degrees or radians) are recoverable \u2014 no legend is present in the image. Mean luminance of 31.9 (barely above the 30.0 sentinel) reflects that 77% of the map is ocean.",
+  "projectr_roles": [
+   "section_selection",
+   "display_only"
+  ],
+  "usefulness": "low",
+  "aligned_equirect": "yes \u2014 4096x2048, 2:1 aspect, matches the standard Gleba export resolution",
+  "integration_notes": "Project-R computes slope internally from the heightmap (TileElevation*) during erosion, so this map is redundant as an erosion driver. The only practical uses are: (a) display_only on the preview sphere as a shaded-relief-like overlay; (b) section_selection \u2014 high-slope regions (cyan fringe pixels at mountain ridges and steep coastlines) are the most geomorphologically interesting targets for erosion runs, so a user-visible slope overlay could guide where to draw the section box. Do NOT use as a heightmap substitute \u2014 it encodes slope not elevation. If an erodibility extension (K_sp) is implemented later, slope-proxy could be a very weak heuristic input, but a lithology/rock-type map would be far more appropriate. Load with Pillow in RGB mode, apply the viridis inverse LUT, mask the sentinel before any spatial analysis.",
+  "caveats": "Fully derived from TileElevation (or whichever elevation layer was used to generate it) \u2014 carries no independent information beyond what the heightmap already contains. Physical units (degrees/radians/rise-over-run) are unrecoverable without the generator's legend. The sentinel value [30,30,30] is ambiguous (could also be a very-low-slope-but-valid land cell at index ~0 on the ramp, though visually it blankets the entire ocean). Only the bottom half of the viridis ramp is populated, compressing dynamic range. No ice-age vs no-ice variant concern applies to a slope map.",
+  "confidence": "medium"
+ },
+ {
+  "name": "TrueColor",
+  "represents": "Stylized sRGB true-color planet surface visualization: dark navy ocean, green vegetation, sandy/tan desert, reddish-brown bare mountains, white polar ice caps \u2014 analogous to a NASA \"Blue Marble\"-style composite but rendered by the Gleba planet generator.",
+  "encoding": "truecolor_rgb",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "Load as sRGB, use pixel values directly. No LUT inversion, no colormap lookup. Ocean is a very dark saturated navy (~[10-15, 14-25, 54-70] RGB); land varies from green (~[30-80, 80-140, 30-80]) to sandy tan (~[180-230, 180-220, 100-160]) to bare brown/red for high terrain; polar caps are near-white ([210-230, 210-230, 210-230]). For a derived binary land/sea mask: classify pixels as ocean where B > 40 AND B > 2*R AND B > 1.8*G (tuned to this dark-navy palette), else land.",
+  "value_semantics": "No physical scalar encoded. Colors are display aesthetic: navy = open ocean; green = vegetated land; tan/beige = arid/desert; brownish-red = bare high terrain; near-white = polar ice/snow; light gray fringe at extreme poles. No colorbar or legend present.",
+  "projectr_roles": [
+   "world_map",
+   "land_sea_mask"
+  ],
+  "usefulness": "high",
+  "aligned_equirect": "yes \u2014 4096x2048, exact 2:1 aspect, matches the standard Gleba export resolution used by all sibling maps in this export set.",
+  "integration_notes": "Primary role: plug directly into the World Map slot (sRGB, decode-on-load = none). It will render on the preview sphere immediately and gives the user excellent visual context for section selection \u2014 continent shapes, desert vs forest zones, and polar extents are all clearly legible. Secondary/extension role: derive a land/sea mask on-the-fly from the RGB values (see decode recipe) and feed it into a future LAND_SEA_MASK slot to define sea level precisely instead of using a brightness threshold on the heightmap. The ocean is planet-spanning (~60% of pixels by top-color analysis) so the mask signal is strong. No resampling needed for the world-map role. For the mask derivation, a single-pass numpy op over the loaded array is sufficient; no PIL palette required.",
+  "caveats": "8-bit only \u2014 banding is irrelevant for a display image but means this cannot substitute for the heightmap. Contains zero elevation information. The ocean color is an unusually dark navy (min luminance ~15), not standard cerulean, so any generic \"blue-channel threshold\" land/sea code written for other planet generators will need retuning. The stylized rendering means coastline pixels can have mixed colors (anti-aliased edge blending), so a hard mask will have a 1-2 pixel ragged fringe \u2014 erode/dilate before use as a mask. Redundancy: if a dedicated LandSea or OceanMask export exists in the same export set, prefer that over deriving from TrueColor.",
+  "confidence": "high"
+ },
+ {
+  "name": "Vegetation",
+  "represents": "Vegetation density / plant cover index over land surfaces; ocean is masked to near-black (~30,30,30).",
+  "encoding": "colormap_ramp:custom_jet_like",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "1. Ocean mask: pixels where all three channels < 25 are ocean (set scalar = NaN or 0). These account for ~77% of the image (the near-black RGB 30,30,30 background). 2. For remaining land pixels, convert RGB to HSV. The hue encodes the scalar position along a blue\u2192green\u2192yellow\u2192red ramp (no standard matplotlib colormap matched; best fit was cubehelix at mean_err=0.11, too poor to trust). Use hue as a proxy scalar: scalar = clamp((240 - H_degrees) / 240, 0, 1), where H=240\u00b0 (blue) maps to 0 (sparse/no vegetation) and H=0\u00b0/360\u00b0 (red) maps to 1 (dense vegetation). Dark-interior land patches (HSV value < 0.15) where hue is ambiguous should be treated as either very low or very high \u2014 inspect against a known biome region to confirm which end of the ramp they occupy. 3. Alternatively, if a reference color bar from the exporter is available, build a 256-entry LUT from its sampled stops and do nearest-color lookup.",
+  "value_semantics": "Black/near-black (RGB ~0\u201325) = ocean, no data. Blue = low vegetation (sparse, coastal, tundra-like). Green = moderate. Yellow/orange = high. Red = peak density. Dark patches inside continental interiors are either deserts (lowest end of ramp, scalar \u2248 0) or highest oversaturation \u2014 visual inspection suggests they are low-vegetation dry cores (deserts) within otherwise high-vegetation belts. No physical units or legend visible; scalar is dimensionless [0, 1].",
+  "projectr_roles": [
+   "none"
+  ],
+  "usefulness": "low",
+  "aligned_equirect": "yes \u2014 4096x2048, exact 2:1 aspect ratio, pixel-aligned with the other Gleba exports in this folder.",
+  "integration_notes": "No current Project-R slot accepts vegetation data. Two extension paths exist: (a) Spatial erodibility K_sp \u2014 invert the scalar (high vegetation = lower K_sp, roots armour soil); load at erosion time, resample to section resolution, multiply against the base K_sp constant. (b) Section-selection guidance only \u2014 display on the preview sphere so the user can identify lush vs arid regions to target. Do not use as a RAINFALL proxy; this export set almost certainly includes a dedicated precipitation/humidity map which is a more direct erosion driver. The colormap is non-standard, so the hue-based decode above is an approximation; validate by checking a pixel known to be dense tropical forest (should decode near 1.0).",
+  "caveats": "No standard matplotlib colormap fits (best mean_err 0.11 over a 47% ramp coverage), so pixel\u2192scalar inversion is approximate. The ambiguity of dark interior patches (desert vs maximum-vegetation saturation) must be resolved before using the scalar quantitatively. If the export pack includes a separate precipitation or humidity map, that map will be strictly more useful for all erosion-driver roles. Vegetation is a lagging ecological indicator and does not directly encode rock erodibility \u2014 the K_sp extension use is indirect at best. 8-bit depth means only 256 quantization levels, acceptable for a soft spatial field but not for any primary terrain data.",
+  "confidence": "medium"
+ },
+ {
+  "name": "Volcanism",
+  "represents": "Per-pixel volcanism intensity / tectonic activity level, with discrete intensity classes and sparse point markers for active volcanic hotspots along plate boundaries",
+  "encoding": "categorical_palette",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048 (effectively 10 unique colors = discrete classes)",
+  "decode_recipe": "Nearest-color palette lookup to class id. Confirmed palette (all 10 colors): (30,30,30)->0 background/ocean/no-volcanism (77%); (80,80,80)->1 moderate volcanism / continental land (23%); (250,0,0)->2 high volcanism hotspot / active volcanic zone (0.06%); (0,250,50)->3 secondary volcanic marker (0.01%); (255,255,255)->4 peak/special marker (trace); (62,0,0)->5 attenuated red hotspot; (0,62,12)->6 attenuated green marker; (62,63,63)->7 transitional gray; (62,37,0)->8 brownish transition; (250,150,0)->9 orange volcanic marker (all trace). Assign scalar weight 0/1/2 (or 0.0/0.5/1.0) for classes 0/1/2 to produce a continuous uplift-proxy ramp if needed. Use nearest-color (L2 in RGB) rather than channel thresholds due to the near-neutral grays.",
+  "value_semantics": "No physical units shown; purely relative ordinal. Dark (30,30,30) = quiescent/ocean = 0 volcanism. Medium gray (80,80,80) = continental / low-moderate volcanism. Red (250,0,0) = active volcanic hotspot / high volcanism. Green (0,250,50) = distinct secondary volcanic marker (possibly different eruption style or hydrothermal). White (255,255,255) = peak intensity or special boundary marker. Red/green dots visually trace a ring-of-fire pattern along southern and western continental margins.",
+  "projectr_roles": [
+   "uplift",
+   "section_selection"
+  ],
+  "usefulness": "medium",
+  "aligned_equirect": "yes \u2014 4096x2048 (2:1), matches the standard Gleba export resolution",
+  "integration_notes": "Not a direct erosion input. Two extension uses: (1) Spatial UPLIFT field U \u2014 reclassify palette classes 0/1/2 to a 0\u20131 scalar (ocean=0, land=0.3, hotspot=1.0) and feed into the stream-power uplift term U so volcanic zones build relief faster than stable cratons. Load with nearest-color decode, then bicubic resample to section resolution. (2) Section-selection guidance \u2014 overlay class-2 (red) pixels on the preview sphere so the user can deliberately pick volcanic arc sections for geologically interesting erosion runs. No blending with heightmap or rainfall; treat as a separate property layer. If future versions expose a K_sp erodibility field, note that volcanic rock is moderately soft (basalt weathers faster than granite) \u2014 class 1 land could carry a slightly elevated K_sp.",
+  "caveats": "Only 10 discrete levels \u2014 this is ordinal/categorical, not a continuous scalar; the analyzer's grayscale_continuous verdict is wrong. The two dominant classes (dark/gray) occupy 99.9% of pixels; the colored hotspot markers are sparse point features at sub-0.1% coverage, so any resampling must use nearest-neighbor to preserve them (bilinear would smear red into gray). No legend or physical unit range is embedded. Redundancy check: if sibling exports include a TectonicActivity or PlateStress map, that may carry the same information at higher fidelity \u2014 verify before using both as uplift drivers.",
+  "confidence": "high"
+ },
+ {
+  "name": "Waterbodies",
+  "represents": "Binary land/ocean classification with individually color-labeled inland waterbodies (lakes, ponds, rivers). Two dominant classes cover 99.6% of pixels; scattered colored pixels each encode a unique waterbody ID.",
+  "encoding": "categorical_palette",
+  "channels_bitdepth": "3ch 8-bit RGB, 4096x2048",
+  "decode_recipe": "Check if pixel is grayscale: abs(R-G) < 4 AND abs(R-B) < 4. If grayscale: mean < 55 \u2192 class 0 (ocean); mean \u2265 55 \u2192 class 1 (land). If not grayscale: assign a unique integer waterbody ID by mapping the exact RGB tuple to a sequential index (one color per connected waterbody feature). No colormap LUT inversion needed \u2014 colors are arbitrary per-feature labels, not a ramp.",
+  "value_semantics": "Black/near-black (30,30,30): ocean \u2014 76.7% of pixels. Mid-gray (80,80,80): land \u2014 22.9% of pixels. Colored non-grayscale pixels (~0.36%): individual inland waterbodies, each unique RGB = one waterbody instance (no physical unit, no consistent colormap \u2014 purely an ID label). No legend visible; no physical range inferable from color.",
+  "projectr_roles": [
+   "land_sea_mask",
+   "display_only"
+  ],
+  "usefulness": "low",
+  "aligned_equirect": "yes \u2014 4096x2048, standard 2:1 equirect, pixel-aligned with the other Gleba exports",
+  "integration_notes": "To extract a binary land/sea mask: threshold mean(R,G,B) at 55 \u2014 pixels below are ocean (0), above are land (1). This mask could feed Project-R's planned land_sea_mask extension slot to define sea level precisely rather than relying on a brightness threshold on the heightmap. The waterbody ID layer (colored pixels) is not actionable without a companion legend mapping color \u2192 waterbody type/name; ignore it unless that metadata becomes available. Load as a single-channel uint8 after the grayscale extraction step; no resampling needed at 4096x2048.",
+  "caveats": "Redundant with the heightmap: any pixel below sea-level elevation already implies ocean, making this mask largely superfluous unless the heightmap has ambiguous sea-level calibration. The analyzer verdict of grayscale_continuous is misleading \u2014 the image is effectively two-class categorical (the two gray values are discrete, not a ramp). The colored waterbody IDs carry no usable metadata without a separate legend file; their spatial extent is tiny (0.36% of pixels). No rainfall, erodibility, or elevation information present.",
+  "confidence": "high"
+ }
+]
