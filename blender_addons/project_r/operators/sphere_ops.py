@@ -138,11 +138,11 @@ def ensure_overlay_connected(context: bpy.types.Context) -> None:
 
     manifest = manifest_lib.read_manifest(mp)
     world_map = manifest.get("global", {}).get("world_map", {}) or {}
-    world_path = world_map.get("path")
-    if not world_path:
+    world_path = manifest_lib.resolve_source_path(root, world_map.get("path"))
+    if world_path is None:
         return
 
-    world_img = bpy.data.images.load(world_path, check_existing=True)
+    world_img = bpy.data.images.load(str(world_path), check_existing=True)
 
     overlay_path = None
     overlay = manifest.get("global", {}).get("overlay")
@@ -183,10 +183,10 @@ def ensure_overlay_connected_with_paths(
             return
         manifest = manifest_lib.read_manifest(mp)
         world_map = manifest.get("global", {}).get("world_map", {}) or {}
-        world_path = world_map.get("path")
-        if not world_path:
+        world_path = manifest_lib.resolve_source_path(root, world_map.get("path"))
+        if world_path is None:
             return
-        world_img = bpy.data.images.load(world_path, check_existing=True)
+        world_img = bpy.data.images.load(str(world_path), check_existing=True)
 
     _ensure_sphere_material(obj=obj, world_image=world_img, overlay_path=overlay_path)
 
@@ -264,6 +264,15 @@ class PP_OT_load_world_map(Operator):
         default="",
     )
 
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        s = getattr(context.scene, "projection_pasta", None)
+        mp = s.manifest_path() if s is not None else None
+        if mp is None or not mp.exists():
+            cls.poll_message_set("Open or create a project first")
+            return False
+        return True
+
     def invoke(self, context: bpy.types.Context, event: bpy.types.Event):
         context.window_manager.fileselect_add(self)
         return {"RUNNING_MODAL"}
@@ -273,7 +282,7 @@ class PP_OT_load_world_map(Operator):
         root = s.project_root_path()
         mp = s.manifest_path()
         if root is None or mp is None or not mp.exists():
-            self.report({"ERROR"}, "manifest.json not found (set Project Root and run Init Project)")
+            self.report({"ERROR"}, "manifest.json not found (Open or Create a project first)")
             return {"CANCELLED"}
         if not self.filepath:
             self.report({"ERROR"}, "No world map selected")
@@ -301,8 +310,11 @@ class PP_OT_load_world_map(Operator):
         manifest = manifest_lib.read_manifest(mp)
         manifest.setdefault("global", {}).setdefault("projection", "Equirectangular")
         manifest["global"]["size"] = [int(w), int(h)]
+        # Store the path relative to the project root when the map lives inside
+        # the project, so the manifest stays portable across machines/accounts.
+        stored_path = manifest_lib.relativize_path(root, self.filepath)
         manifest.setdefault("global", {})["world_map"] = {
-            "path": self.filepath,
+            "path": stored_path,
             "size": [int(w), int(h)],
             "aspect_ratio": ratio,
             "aspect_ratio_ok": abs(ratio - 2.0) <= tol,
@@ -316,7 +328,7 @@ class PP_OT_load_world_map(Operator):
             layers.append(
                 {
                     "id": "color_map",
-                    "path": self.filepath,
+                    "path": stored_path,
                     "datatype": "continuous",
                     "format": fmt,
                     "interp": "linear",

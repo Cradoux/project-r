@@ -20,21 +20,25 @@ This workflow is based on the excellent guide by **Worldbuilding Pasta**: [An Ap
 ### Step 1: Download the Addon
 Download [`project_r.zip`](project_r.zip) from the root of this repository.
 
+Project-R is a Blender **4.2+ extension**.
+
 ### Step 2: Install in Blender
-1. Open Blender
-2. Go to **Edit → Preferences**
-3. Click the **Add-ons** tab (left sidebar)
-4. Click **Install...** (top right)
-5. Navigate to `project_r.zip` and click **Install Add-on**
+1. Open Blender (4.2 LTS or newer)
+2. Go to **Edit → Preferences → Get Extensions** (or **Add-ons**)
+3. Click the **▾** menu (top right) → **Install from Disk...**
+4. Navigate to `project_r.zip` and confirm
 
 ### Step 3: Enable the Addon
-1. In the Add-ons list, search for "Project-R"
-2. Check the checkbox to enable it
-3. If prompted to install scipy, click **Install scipy** and restart Blender
+1. In the list, find "Project-R" and tick the checkbox to enable it.
 
-### Step 4: Find the Panel
-1. In the 3D Viewport, press **N** to open the sidebar
-2. Click the **Project-R** tab
+### Step 4: Install Python Dependencies
+1. In the 3D Viewport, press **N** to open the sidebar and click the **Project-R** tab.
+2. If a yellow **Missing: …** box appears, click **Install Dependencies**.
+   - It installs Pillow, scipy, landlab (and the optional `richdem` fast router) into a
+     private Project-R folder, **in the background** — Blender stays usable.
+   - **No restart needed**: the packages become available as soon as the install finishes.
+   - The install needs an internet connection the first time. If `richdem` can't be
+     installed, erosion still works using a slightly slower MIT flow router.
 
 ---
 
@@ -57,11 +61,13 @@ Set the **Planet Radius (km)** value in the Project panel:
 - This is used to calculate the physical size of each section in kilometers
 - Important for consistent erosion/terrain processing in Gaea
 
-### Step 4: Initialize the Project
-1. In the Project-R panel, set **Project Root** to your project folder
-2. Click **Init Project**
-   - This creates the folder structure and `manifest.json`
-   - If loading an existing project, it will automatically load the world map
+### Step 4: Initialize or Open the Project
+1. In the Project-R panel, set **Project Root** to your project folder.
+   - **Opening an existing project loads automatically** as soon as you set the root —
+     the manifest, world map and overlay are restored, no button press required.
+2. For a brand-new folder, click **Create Project** to write the folder structure and
+   `manifest.json`. (For an existing project use **Reload Project** if you ever need to
+   force a re-load.)
 
 ### Step 5: Load the World Map
 1. Click **Load World Map**
@@ -242,6 +248,75 @@ project/
 ```
 
 **Important:** Filenames must be consistent across sections for reassembly. If you create `gaea_erosion.png` for one section, create it for all sections.
+
+---
+
+## In-Blender Erosion (GPL stream-power)
+
+Instead of (or in addition to) processing each section externally in Gaea/Wilbur, Project-R can carve
+**believable dendritic river drainage directly in Blender**. It runs a physically-based landscape
+evolution model (stream-power incision + hillslope diffusion) on the section crop — which already sits
+in the low-distortion, **equal-area** oblique Hammer projection, the geomorphically correct space to
+erode in — then writes the result to `processed/` so **Reassemble** blends it back into the global map.
+
+**Why this lives in Project-R:** the section/reassemble pipeline already does the hard geometry
+(equal-area crop + feathered seam blend), and because Project-R is **GPL** it can use the fast,
+near-linear GPL flow router (`PriorityFloodFlowRouter`, via `richdem`) that robustly handles the pits
+erosion creates — an MIT-only tool cannot.
+
+### Step 0: Install the erosion dependencies
+Erosion needs `landlab` (+ `scipy`) and, for the fast router, `richdem`. Click **Install
+Dependencies** in the panel. It installs into a private Project-R folder **in the background**
+(Blender stays responsive) and the packages are usable **without restarting Blender**. If `richdem`
+can't install, erosion still works using a slower MIT-licensed fallback router — the panel shows
+which router is active. To erode immediately after creating a section, tick **Erode after creating**
+in *Section Export* before clicking **Create Section**.
+
+### Step 1: Point it at a heightmap
+Set **Heightmap File** (in *Section Export*) to your height layer's filename (e.g. `heightmap.png`),
+and **Max Elevation (m)** to the metres represented by pure white. Erosion reads the section's
+heightmap crop, converts brightness → metres, erodes in metres, then re-encodes with the same
+brightness range.
+
+### Step 2: Configure erosion (Erosion panel)
+- **Section** — pick which section to erode from the dropdown (defaults to **Most recent**).
+- **Seed Noise** — fine noise added before eroding so channels meander instead of snapping to grid
+  directions. *Smoothed Gauss* (default) or *Fractal* break the grid-bias; ~0.5–0.6 amount keeps the
+  large-scale form. (White noise does **not** help.)
+- **Climate** — a rainfall field so incision concentrates where it rains. *Orographic* gives the
+  strongest wet-windward / dry-rain-shadow contrast; *Tropical* and *Gradient* are gentler.
+- **Steps** — erosion iterations (~200 reaches the mature, naturally-concave drainage equilibrium).
+- **Erodibility (K)** — how aggressively rivers cut (smaller crops want a larger K than the global default).
+- **Advanced LEM Settings** — area/slope exponents (m, n), hillslope diffusivity, uplift, timestep,
+  noise seed, and **Max Work Resolution** (downsamples large crops before eroding to keep bake times
+  sane — erosion is blocking and scales ~linearly: ~2 min at 256 px, ~7 min at 512 px).
+- **Channel Overlay** *(optional)* — engraves shallow, flat-bottomed channels onto the eroded surface
+  (a multi-scale blur carve, sized automatically from the section's resolution).
+  Kept deliberately light so it sharpens channels without destroying the LEM's drainage realism.
+- **Target Peak (m)** — linearly rescale the result so its max equals this height; `0` preserves the
+  section's original peak.
+
+### Step 3: Erode
+Click **Erode Section**. Blender will be busy for the duration (see timing above). When done, the panel
+shows a quality readout:
+- **theta** — slope-area concavity. Real river drainage sits at **~0.45–0.5**; pure noise reads ~0.
+- **R²** — how cleanly the drainage follows the stream-power law (want **> 0.9**).
+- **band** — valley-floor flatness proxy (lower = flatter, wider floors).
+
+A "drainage OK" verdict means theta ≈ 0.5 with high R². Always also eyeball the result — the
+hillshade is the real test. The eroded heightmap is written to
+`processed/<section_id>/<heightmap_filename>` (a drop-in that **Reassemble** picks up automatically),
+plus an inspection copy `sections/<section_id>/<name>__eroded.png`.
+
+The eroded heightmap is written **section-normalized** (its peak = white = the section's own
+elevation) — exactly the convention a Gaea/Wilbur export uses — and the operator records that
+elevation in `manifest.json`. So eroded sections compose correctly with each other and with
+externally-processed sections.
+
+### Step 4: Reassemble
+Run **Reassemble** as usual to blend the eroded sections into the global equirectangular map. Keep
+**Normalize Heights** ON (the default) so each section's recorded elevation is restored and
+multi-section relative heights come out correct.
 
 ---
 

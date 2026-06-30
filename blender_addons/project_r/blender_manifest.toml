@@ -1,0 +1,38 @@
+schema_version = "1.0.0"
+
+# Unique identifier for the extension.
+id = "project_r"
+version = "0.2.0"
+name = "Project-R"
+# tagline must be a single line, <= 64 chars, no trailing punctuation.
+tagline = "Low-distortion Hammer section split, erosion, reassembly"
+maintainer = "Chris Radoux (Kilroys Katography)"
+type = "add-on"
+
+website = "https://github.com/Cradoux/Project-R"
+
+# Tags must come from the add-on tag enum
+# (https://docs.blender.org/manual/en/latest/advanced/extensions/tags.html).
+tags = ["Import-Export", "Pipeline", "Render"]
+
+blender_version_min = "4.2.0"
+
+# GPL-3.0: the addon vendors projectionpasta (GPL) and uses the GPL richdem router.
+license = ["SPDX:GPL-3.0-or-later"]
+
+# Heavy scientific deps (Pillow, scipy, landlab, richdem) are NOT bundled as wheels;
+# they are installed on demand into a private per-user folder by the "Install
+# Dependencies" button (see deps.py). That needs network + filesystem access.
+# Each explanation must be a short single sentence, <= 64 chars, no end punctuation.
+[permissions]
+network = "Download Python deps (Pillow, scipy, landlab) via pip"
+files = "Read source maps; read/write sections and manifest.json"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "/.git/",
+  "*.zip",
+  "/.mypy_cache/",
+  "/tests/",
+]
