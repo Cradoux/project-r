@@ -106,6 +106,57 @@ def _load_crop_field(crop_path: Path, work_w: int, work_h: int) -> Optional[np.n
         return None
 
 
+def _find_landsea_filename(sec: dict, explicit: str) -> Optional[str]:
+    """Crop filename to use as the land/sea (coastline) mask: the explicit one if present
+    in this section's crops, else the first land/sea-like crop, else None. An explicit name
+    that isn't present returns None (the caller falls back to the heightmap's sea level)."""
+    explicit = (explicit or "").strip()
+    if explicit:
+        return _find_layer_crop(sec, explicit)
+    crop_paths = (sec.get("crop", {}) or {}).get("paths_by_layer", {}) or {}
+    for n in crop_paths:
+        if layers.is_landsea_name(n):
+            return n
+    return None
+
+
+def _full_canvas_window(root: Path, rel_path: str, win, out_w: int, out_h: int) -> Optional[np.ndarray]:
+    """Read the pixel window ``[y0:y1, x0:x1]`` from a section's retained full Hammer canvas
+    (``rel_path`` relative to ``root``) and resample to (out_h, out_w) as float32. This is how
+    the seam halo pulls REAL neighbour terrain -- already in the section's projection -- from
+    the canvas the crop was cut from. Returns None on any failure (caller falls back)."""
+    try:
+        x0, y0, x1, y1 = (int(v) for v in win)
+        img = imaging.load_image(root / rel_path)
+        px = img.pixels
+        if px.ndim == 3:
+            px = px[:, :, 0]
+        sub = px[y0:y1, x0:x1].astype(np.float32)
+        if sub.size == 0 or sub.shape[0] < 1 or sub.shape[1] < 1:
+            return None
+        return layers.resample_2d(sub, out_w, out_h)
+    except Exception as ex:
+        print(f"[Project-R] Warning: failed to read full-canvas window '{rel_path}': {ex}")
+        return None
+
+
+def _match_halo(core_field: Optional[np.ndarray], root: Path, sec: dict, stem: str,
+                halo: Optional[dict]) -> Optional[np.ndarray]:
+    """Resize a core (work-res) per-node field to the enlarged halo shape: prefer the layer's
+    own full-canvas window (real neighbour data), else edge-pad the core into the halo ring.
+    Pass-through when there is no halo or no field."""
+    if core_field is None or halo is None:
+        return core_field
+    fc = (sec.get("full_canvas", {}) or {}).get("path_by_layer", {}) or {}
+    rel = fc.get(stem)
+    if rel and (root / rel).exists():
+        enl = _full_canvas_window(root, rel, halo["win"], halo["Wk"], halo["Hk"])
+        if enl is not None:
+            return enl
+    ht_w, hb_w, hl_w, hr_w = halo["pad"]
+    return np.pad(core_field, ((ht_w, hb_w), (hl_w, hr_w)), mode="edge")
+
+
 class PP_OT_erode_section(bpy.types.Operator):
     bl_idname = "pp.erode_section"
     bl_label = "Erode Section"
@@ -209,6 +260,71 @@ class PP_OT_erode_section(bpy.types.Operator):
             work_seed = height_m
         cell_work_m = ground_w_m / float(work_w)
 
+        # --- Seam Halo: replace the work seed with an ENLARGED window read from the section's
+        # retained full Hammer canvas (same projection, real neighbour terrain), so the LEM's
+        # no-flow boundary sits OUT in a ring we discard -- rivers/relief then stay continuous
+        # across section seams. Everything downstream runs on the enlarged array; the core is
+        # sliced back out just before encoding. Falls back to no halo for sections created
+        # before full-canvas retention, or if the canvas is missing. ---
+        halo = None
+        halo_px = int(es.seam_halo_px)
+        if halo_px > 0:
+            rect_xywh = (sec.get("crop", {}) or {}).get("rect_xywh")
+            fc = sec.get("full_canvas", {}) or {}
+            fc_size = fc.get("size") or [0, 0]
+            hm_full_rel = (fc.get("path_by_layer", {}) or {}).get(Path(hm_name).stem)
+            fcw, fch = (int(fc_size[0]), int(fc_size[1])) if len(fc_size) >= 2 else (0, 0)
+            if rect_xywh and hm_full_rel and fcw > 0 and fch > 0 and (root / hm_full_rel).exists():
+                rx, ry, rw, rh = (int(v) for v in rect_xywh)
+                sx, sy = work_w / float(rw), work_h / float(rh)  # work px per canvas px, per axis
+                hcx, hcy = int(round(halo_px / max(sx, 1e-9))), int(round(halo_px / max(sy, 1e-9)))
+                x0, y0 = max(0, rx - hcx), max(0, ry - hcy)
+                x1, y1 = min(fcw, rx + rw + hcx), min(fch, ry + rh + hcy)
+                hl_w, ht_w = int(round((rx - x0) * sx)), int(round((ry - y0) * sy))
+                hr_w, hb_w = int(round((x1 - (rx + rw)) * sx)), int(round((y1 - (ry + rh)) * sy))
+                Wk, Hk = hl_w + work_w + hr_w, ht_w + work_h + hb_w
+                win = (x0, y0, x1, y1)
+                enl = _full_canvas_window(root, hm_full_rel, win, Wk, Hk)
+                if enl is not None and (hl_w + ht_w + hr_w + hb_w) > 0:
+                    work_seed = (enl * max_elev_m).astype(np.float32)
+                    halo = dict(cx0=hl_w, cy0=ht_w, Wk=Wk, Hk=Hk, win=win,
+                                pad=(ht_w, hb_w, hl_w, hr_w))
+                    print(f"[Project-R] Seam halo +{halo_px}px: core {work_w}x{work_h} inside "
+                          f"{Wk}x{Hk} (canvas window {x1 - x0}x{y1 - y0})")
+                elif enl is None:
+                    self.report({"WARNING"}, "Seam Halo: could not read the full Hammer canvas; "
+                                             "eroding without a halo.")
+                # else: canvas present but the crop already spans it (no room for a ring) -> no-op.
+            else:
+                self.report({"WARNING"}, "Seam Halo needs a section created with full-canvas "
+                                         "retention (re-create the section); eroding without a halo.")
+
+        # --- Lock Coastline: snapshot the authoritative shore from the PRISTINE input,
+        # before any pre-pass reshapes work_seed. Source priority: a dedicated Land/Sea mask
+        # (auto-oriented vs the elevation so either tone-convention works), else the input
+        # heightmap's sea level. Because every section derives this from the SAME global
+        # source, adjacent sections agree along their shared edge -> coastlines tile. The
+        # final compose re-pins to this mask so erosion never moves the shore. ---
+        locked_sea = None
+        orig_seed = None
+        if bool(es.lock_coastline):
+            orig_seed = np.array(work_seed, copy=True)
+            elev_sea = orig_seed <= float(es.sea_level_m)
+            ls_name = _find_landsea_filename(sec, es.landsea_filename)
+            ls_field = None
+            if ls_name:
+                ls_field = _load_crop_field(root / "sections" / sec_id / "crops" / ls_name, work_w, work_h)
+                ls_field = _match_halo(ls_field, root, sec, Path(ls_name).stem, halo)
+            if ls_field is not None:
+                sea_if_low = ls_field < 0.5
+                # Auto-orient: pick the polarity that agrees more with the elevation's sea.
+                locked_sea = sea_if_low if float((sea_if_low == elev_sea).mean()) >= 0.5 else ~sea_if_low
+            else:
+                if (es.landsea_filename or "").strip() and ls_name is None:
+                    self.report({"WARNING"}, f"Land/Sea mask '{es.landsea_filename}' not found in this "
+                                             f"section's crops; locking to the heightmap's sea level.")
+                locked_sea = elev_sea
+
         # --- Optional glacial (fjord) pre-pass: carve U-troughs / over-deepened basins
         # FIRST, before coastal and the LEM. This is the EARLIEST structural pre-pass. Like
         # coastal, it reshapes work_seed ITSELF: the deepest troughs drop BELOW sea level, so
@@ -239,7 +355,11 @@ class PP_OT_erode_section(bpy.types.Operator):
         # ("restore the original ocean") would silently undo every coastline change. We
         # apply it once here (not inside run_erosion) so the blend baseline stays consistent.
         coastal_info = None
-        if bool(es.enable_coastal):
+        if bool(es.enable_coastal) and locked_sea is not None:
+            self.report({"INFO"}, "Lock Coastline is on: skipping the coastal wave pass (it would "
+                                  "move the shore).")
+            print("[Project-R] Coastal pre-pass skipped (Lock Coastline on).")
+        elif bool(es.enable_coastal):
             # Rate/steps/reach/fetch follow the Scale x Intensity preset (auto-sized to the
             # section) unless Scale is Custom; swell/talus/beach style stay user-controlled.
             if str(es.lem_scale) == "CUSTOM":
@@ -312,6 +432,17 @@ class PP_OT_erode_section(bpy.types.Operator):
                 self.report({"WARNING"}, f"Erodibility map '{es.erodibility_filename}' not found in this "
                                          f"section's crops; using uniform erodibility.")
 
+        # Seam halo: enlarge the per-node fields the LEM consumes to the halo shape (real
+        # neighbour data from each layer's full canvas, else edge-padded), so run_erosion sees a
+        # grid matching the enlarged seed. Bathymetry stays core -- its pass runs after slicing.
+        if halo is not None:
+            if rainfall_work is not None and rain_name:
+                rainfall_work = _match_halo(rainfall_work, root, sec, Path(rain_name).stem, halo)
+            if uplift_work is not None:
+                uplift_work = _match_halo(uplift_work, root, sec, Path(es.uplift_filename).stem, halo)
+            if erod_work is not None:
+                erod_work = _match_halo(erod_work, root, sec, Path(es.erodibility_filename).stem, halo)
+
         # --- Optional direct bathymetry map (for the sea-floor pass) -> [0..1] depth at work res ---
         bathy_work = None
         bathy_name = (es.seafloor_bathy_filename or "").strip()
@@ -358,7 +489,11 @@ class PP_OT_erode_section(bpy.types.Operator):
               f"preset {scale_label}, steps {lem_kw['steps']}, strength {strength:.2f}, sea {sea_level_m:.0f} m, "
               f"rain {rain_name or 'uniform'}, "
               f"uplift-map {(es.uplift_filename if uplift_work is not None else 'uniform')}, "
-              f"erod-map {(es.erodibility_filename if erod_work is not None else 'uniform')}")
+              f"erod-map {(es.erodibility_filename if erod_work is not None else 'uniform')}, "
+              f"coastline {'locked' if locked_sea is not None else 'emergent'}, "
+              f"shore-taper {float(es.shore_taper_m):.0f} m, "
+              f"seam-halo {('+' + str(halo_px) + 'px' if halo is not None else 'off')}, "
+              f"deposition {('SPACE v_s=' + format(float(es.depo_v_s), '.2g') if es.enable_deposition else 'off')}")
 
         # Erosion is a blocking compute (seconds to many minutes). Until it becomes a
         # background job, at least show an honest busy state: a WAIT cursor and a
@@ -390,6 +525,8 @@ class PP_OT_erode_section(bpy.types.Operator):
                     target_peak_m=None,  # rescale AFTER the blend so the peak lands exactly
                     base=0.0,
                     sea_level_m=sea_level_m,
+                    enable_deposition=bool(es.enable_deposition),
+                    depo_v_s=float(es.depo_v_s),
                     **lem_kw,
                 )
             except Exception as e:
@@ -410,11 +547,41 @@ class PP_OT_erode_section(bpy.types.Operator):
             # over-erosion dial) and restore the OCEAN exactly, at the output resolution,
             # so the coastline/landmass shape is kept and the sea stays flat/black.
             # work_seed is the original surface resampled to the output grid.
-            sea_mask_w = work_seed <= sea_level_m
-            blended = work_seed + strength * (z_work - work_seed)
-            z_out = np.where(sea_mask_w, work_seed, blended).astype(np.float32)
+            #
+            # Sea mask + baseline: Lock Coastline forces the PRISTINE input shore (so erosion
+            # never moves it and neighbouring sections tile) and restores the original flat
+            # ocean; otherwise the post-pre-pass seed defines the shore (preserves fjords etc).
+            if locked_sea is not None:
+                sea_mask_w = locked_sea
+                sea_baseline = orig_seed
+            else:
+                sea_mask_w = work_seed <= sea_level_m
+                sea_baseline = work_seed
+            # Shore Taper: fade Erosion Strength to zero within `shore_taper_m` metres above
+            # sea level, so the coast is carved progressively less approaching the water --
+            # softens the serrated 'teeth' a hard land/sea cutoff leaves. 0 = hard cutoff.
+            taper_m = float(es.shore_taper_m)
+            if taper_m > 0.0:
+                w = np.clip((work_seed - sea_level_m) / taper_m, 0.0, 1.0) * strength
+            else:
+                w = strength
+            blended = work_seed + w * (z_work - work_seed)
+            z_out = np.where(sea_mask_w, sea_baseline, blended).astype(np.float32)
             land = ~sea_mask_w
             z_out[land] = np.maximum(z_out[land], sea_level_m)
+
+            # Seam halo: discard the neighbour ring now -- slice the core (exactly work_w x
+            # work_h, the size Reassemble expects) out of every enlarged array so all downstream
+            # encoding, ocean fill and ice export see the section alone, not its context.
+            if halo is not None:
+                core = (slice(halo["cy0"], halo["cy0"] + work_h),
+                        slice(halo["cx0"], halo["cx0"] + work_w))
+                z_out = z_out[core]
+                sea_mask_w = sea_mask_w[core]
+                if glacial_ice is not None:
+                    glacial_ice = {k: (v[core] if isinstance(v, np.ndarray)
+                                       and v.shape == (halo["Hk"], halo["Wk"]) else v)
+                                   for k, v in glacial_ice.items()}
 
             z_ocean_real = np.where(sea_mask_w, z_out, 0.0)  # real-metre ocean (incl. fjords) for the Gaea floor
             pre_rescale_max = float(z_out.max())  # land peak BEFORE rescale -> sets brightness-per-metre

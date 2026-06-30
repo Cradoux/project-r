@@ -429,6 +429,49 @@ class ProjectionPastaErosionSettings(PropertyGroup):
         soft_min=-1000.0,
         soft_max=2000.0,
     )
+
+    # --- Coastline handling (force the input shore; soften the land/sea cutoff) ---
+    lock_coastline: BoolProperty(  # type: ignore[valid-type]
+        name="Lock Coastline",
+        description="Force the output land/sea boundary to match the INPUT coastline exactly, so "
+                    "erosion never moves the shore and neighbouring sections (which share the same "
+                    "global source map) tile seamlessly. Uses the Land/Sea Mask below if set, "
+                    "otherwise the input heightmap's sea level. Skips the coast-moving wave pass "
+                    "while on, and incompatible with glacial fjords (the locked shore wins)",
+        default=False,
+    )
+    landsea_filename: StringProperty(  # type: ignore[valid-type]
+        name="Land/Sea Mask",
+        description="Optional land/sea (coastline) mask in source/ used by Lock Coastline as the "
+                    "authoritative shore. Polarity (which tone is sea) is auto-oriented against the "
+                    "heightmap, so either convention works. Empty = derive the coastline from the "
+                    "input heightmap's sea level",
+        default="",
+    )
+    shore_taper_m: FloatProperty(  # type: ignore[valid-type]
+        name="Shore Taper (m)",
+        description="Fade erosion strength to zero across this many metres of elevation just above "
+                    "sea level, so the coast is carved less and less approaching the water. Softens "
+                    "the serrated/'teeth' shoreline that a hard land/sea cutoff produces. "
+                    "0 = hard cutoff (full erosion right up to the waterline)",
+        default=0.0,
+        min=0.0,
+        soft_max=500.0,
+    )
+
+    # --- Seam halo (erode neighbour context so rivers/relief don't break at section edges) ---
+    seam_halo_px: IntProperty(  # type: ignore[valid-type]
+        name="Seam Halo (px)",
+        description="Erode an extra ring of this many pixels of NEIGHBOURING terrain (read from the "
+                    "section's full Hammer canvas, in the same projection) around the section, then "
+                    "discard it. Gives rivers and relief real off-section context so they stay "
+                    "continuous across section seams -- the boundary's no-flow artifacts land in the "
+                    "discarded ring, not the kept core. 0 = off. Needs a section created with "
+                    "full-canvas retention (re-create older sections to use it)",
+        default=0,
+        min=0,
+        soft_max=256,
+    )
     # --- Seed conditioning (breaks D8 grid-bias -> meandering channels) ---
     noise_kind: EnumProperty(  # type: ignore[valid-type]
         name="Seed Noise",
@@ -499,6 +542,25 @@ class ProjectionPastaErosionSettings(PropertyGroup):
         default=1.0,
         min=1.0,
         soft_max=8.0,
+    )
+
+    # --- Sediment deposition (transport-limited SPACE: builds flat alluvial land) ---
+    enable_deposition: BoolProperty(  # type: ignore[valid-type]
+        name="Sediment Deposition",
+        description="Switch the river engine from pure incision (carves canyons everywhere) to a "
+                    "transport-limited model (SPACE) that also DEPOSITS sediment where rivers slow "
+                    "down -- valley floors, lowlands, and the coast -- building flat alluvial land. "
+                    "This is the realistic fix for an over-incised, canyon-everywhere look",
+        default=False,
+    )
+    depo_v_s: FloatProperty(  # type: ignore[valid-type]
+        name="Deposition Rate",
+        description="Sediment settling velocity (the main deposition lever). Higher = sediment drops "
+                    "out sooner = thicker, flatter valley-floor and coastal-plain fill; lower = more "
+                    "stays in transport and the rivers keep incising. 0 ~ detachment-limited",
+        default=1.0,
+        min=0.0,
+        soft_max=10.0,
     )
 
     # --- Stream-power LEM parameters ---

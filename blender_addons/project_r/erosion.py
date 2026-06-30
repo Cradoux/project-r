@@ -424,6 +424,13 @@ def lem_erode(
     sea_level: float = 0.0,
     k_field: Optional[np.ndarray] = None,
     uplift_field: Optional[np.ndarray] = None,
+    enable_deposition: bool = False,
+    depo_v_s: float = 1.0,
+    depo_k_sed: Optional[float] = None,
+    depo_k_br: Optional[float] = None,
+    depo_h_star_m: float = 1.0,
+    depo_phi: float = 0.3,
+    depo_f_f: float = 0.0,
 ) -> Tuple[np.ndarray, np.ndarray, Dict]:
     """Evolve ``height_m`` under stream-power incision + linear hillslope diffusion.
 
@@ -462,8 +469,6 @@ def lem_erode(
         k_arg = g.at_node["K_sp_field"]
     else:
         k_arg = k_sp
-    sp = FastscapeEroder(g, K_sp=k_arg, m_sp=m_sp, n_sp=n_sp,
-                         discharge_field="surface_water__discharge")
     ld = LinearDiffuser(g, linear_diffusivity=diffusivity)
     core = g.core_nodes
 
@@ -474,16 +479,81 @@ def lem_erode(
         if u_arr.size != z.size:
             raise ValueError(f"uplift_field size {u_arr.size} != node count {z.size}")
 
-    t0 = time.perf_counter()
-    for _ in range(int(steps)):
-        z[core] += (u_arr[core] if u_arr is not None else uplift) * dt
-        router.run_one_step()
-        sp.run_one_step(dt)
-        ld.run_one_step(dt)
-    secs = time.perf_counter() - t0
+    sed_mean = sed_max = None
+    if enable_deposition:
+        # Transport-limited fluvial erosion + DEPOSITION (SPACE): tracks a sediment layer over
+        # bedrock and lays alluvium down where transport capacity drops -- valley floors,
+        # lowlands, and approaching base level -- so the section grows flat depositional land
+        # instead of incising canyons everywhere. ``depo_v_s`` (settling velocity) is the main
+        # deposition lever; ``K_sed``/``K_br`` default to the stream-power ``k_sp``/``k_field``.
+        from landlab.components import SpaceLargeScaleEroder
+        if "soil__depth" not in g.at_node:
+            g.add_zeros("soil__depth", at="node")
+        if "bedrock__elevation" not in g.at_node:
+            g.add_zeros("bedrock__elevation", at="node")
+        soil = g.at_node["soil__depth"]
+        bedrock = g.at_node["bedrock__elevation"]
+        soil[:] = 0.0
+        bedrock[:] = z - soil  # bedrock + soil == topographic, the invariant SPACE maintains
+        space = SpaceLargeScaleEroder(
+            g, K_sed=(k_arg if depo_k_sed is None else depo_k_sed),
+            K_br=(k_arg if depo_k_br is None else depo_k_br),
+            F_f=float(depo_f_f), phi=float(depo_phi), H_star=float(depo_h_star_m),
+            v_s=float(depo_v_s), m_sp=m_sp, n_sp=n_sp,
+            discharge_field="surface_water__discharge",
+        )
+        # SPACE is an EXPLICIT scheme: unlike the implicit FastscapeEroder it has a CFL limit, and
+        # at Project-R's dt + large discharges the bedrock-incision term overshoots into spurious
+        # deep pits and giant sediment mounds. Sub-step each year-step on a CFL estimate of the
+        # incision-wave speed (K Q^m S^{n-1}); re-route between sub-steps so flow follows the
+        # evolving surface. ``kmax`` bounds the rate when K is a spatial field.
+        disch = g.at_node["surface_water__discharge"]
+        slope = g.at_node["topographic__steepest_slope"]
+        kmax = float(np.max(k_arg)) if isinstance(k_arg, np.ndarray) else float(k_arg)
+        sub_max = 1
+        t0 = time.perf_counter()
+        for _ in range(int(steps)):
+            bedrock[core] += (u_arr[core] if u_arr is not None else uplift) * dt
+            z[:] = bedrock + soil
+            router.run_one_step()
+            rate = kmax * np.power(np.maximum(disch, 0.0), m_sp) \
+                * np.power(np.maximum(slope, 1e-6), max(n_sp - 1.0, 0.0))
+            rmax = float(rate.max()) if rate.size else 0.0
+            nsub = int(np.clip(np.ceil(dt / (0.2 * cell_m / rmax)) if rmax > 0.0 else 1, 1, 64))
+            sub_max = max(sub_max, nsub)
+            sub_dt = dt / nsub
+            for k in range(nsub):
+                if k > 0:
+                    router.run_one_step()
+                space.run_one_step(sub_dt)
+            ld.run_one_step(dt)
+            # Hillslope creep changed the SURFACE; split it back into bedrock + soil for the next
+            # SPACE step. Where creep cut below the (exhausted) regolith, lower BEDROCK too so
+            # bedrock-cored ridges still round off; elsewhere the change lands in the sediment
+            # layer. ``z`` stays the authoritative surface, so soil/bedrock/topo stay consistent.
+            np.minimum(bedrock, z, out=bedrock)
+            soil[:] = z - bedrock
+        secs = time.perf_counter() - t0
+        sed_mean = round(float(soil[core].mean()), 3)
+        sed_max = round(float(soil[core].max()), 1)
+    else:
+        sp = FastscapeEroder(g, K_sp=k_arg, m_sp=m_sp, n_sp=n_sp,
+                             discharge_field="surface_water__discharge")
+        t0 = time.perf_counter()
+        for _ in range(int(steps)):
+            z[core] += (u_arr[core] if u_arr is not None else uplift) * dt
+            router.run_one_step()
+            sp.run_one_step(dt)
+            ld.run_one_step(dt)
+        secs = time.perf_counter() - t0
 
     info = {"router": router_name, "secs": round(secs, 2), "steps": int(steps),
-            "spatial_k": k_field is not None, "spatial_uplift": uplift_field is not None}
+            "spatial_k": k_field is not None, "spatial_uplift": uplift_field is not None,
+            "deposition": bool(enable_deposition)}
+    if enable_deposition:
+        info["sed_mean_m"] = sed_mean
+        info["sed_max_m"] = sed_max
+        info["sub_steps_max"] = sub_max
     out = z.reshape(seed.shape).astype(np.float32)
     dr = g.at_node["drainage_area"].reshape(seed.shape).astype(np.float32)
     return out, dr, info
@@ -1287,6 +1357,8 @@ def run_erosion(
     coastal_swell_focus: float = 0.0,
     coastal_talus_deg: float = 0.0,
     coastal_deposition: bool = True,
+    enable_deposition: bool = False,
+    depo_v_s: float = 1.0,
 ) -> Tuple[np.ndarray, Dict]:
     """Full per-section pipeline: (optional coastal wave reworking) -> condition seed -> rainfall
     -> LEM -> (optional light Wilbur overlay) -> linear peak rescale. Returns
@@ -1390,6 +1462,7 @@ def run_erosion(
         diffusivity=diffusivity, uplift=uplift, dt=dt, steps=steps, flow_metric=flow_metric,
         sea_mask=sea_mask if has_sea else None, sea_level=float(sea_level_m),
         k_field=k_field, uplift_field=uplift_field,
+        enable_deposition=enable_deposition, depo_v_s=depo_v_s,
     )
 
     overlay_secs = None
@@ -1418,6 +1491,10 @@ def run_erosion(
     metrics.update(
         router=lem_info.get("router"),
         lem_secs=lem_info.get("secs"),
+        deposition=lem_info.get("deposition"),
+        sed_mean_m=lem_info.get("sed_mean_m"),
+        sed_max_m=lem_info.get("sed_max_m"),
+        depo_sub_steps_max=lem_info.get("sub_steps_max"),
         overlay_secs=round(overlay_secs, 2) if overlay_secs is not None else None,
         coastal_secs=coastal_info.get("secs") if coastal_info else None,
         coastal_conserved_frac=coastal_info.get("conserved_frac") if coastal_info else None,

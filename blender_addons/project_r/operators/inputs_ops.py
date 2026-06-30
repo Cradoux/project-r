@@ -103,7 +103,7 @@ def _save_single_channel(source: Path, name: str, arr: np.ndarray) -> str:
 
 # Per-slot ingest transform.
 _SLOT_TRANSFORM = {"heightmap": "none", "rainfall": "colormap", "bathymetry": "invert_depth",
-                   "uplift": "luminance", "erodibility": "luminance"}
+                   "uplift": "luminance", "erodibility": "luminance", "landsea": "luminance"}
 
 
 # Slot -> (where the filename lives). Only the roles Project-R consumes today are
@@ -130,6 +130,12 @@ def _set_slot_filename(context, slot: str, filename: str) -> None:
         es.erodibility_filename = filename
         if filename and es.erodibility_contrast <= 1.0001:
             es.erodibility_contrast = 2.0
+    elif slot == "landsea":
+        es.landsea_filename = filename
+        # A coastline mask is only consumed by Lock Coastline; turning it on when one is
+        # loaded matches the obvious intent (clearing leaves the toggle as the user set it).
+        if filename:
+            es.lock_coastline = True
 
 
 class PP_OT_set_input_map(Operator):
@@ -146,6 +152,7 @@ class PP_OT_set_input_map(Operator):
             ("bathymetry", "Bathymetry", "Ocean depth for the Sea Floor pass (Gleba depth maps are inverted)"),
             ("uplift", "Uplift", "Orogeny/uplift intensity (luminance-decoded); concentrates relief in belts"),
             ("erodibility", "Erodibility", "Continuous rock-softness (luminance-decoded); softer erodes faster"),
+            ("landsea", "Land/Sea", "Coastline mask for Lock Coastline (auto-oriented vs the heightmap)"),
         ],
         default="heightmap",
         options={"SKIP_SAVE"},
@@ -262,6 +269,15 @@ class PP_OT_detect_source_maps(Operator):
                 filled.append(f"erodibility={name} (contrast {es.erodibility_contrast:.1f})")
             except Exception as e:
                 notes.append(f"erodibility decode failed: {e}")
+
+        # Land/Sea mask (consumed by Lock Coastline): luminance-decode, turn the lock on.
+        if not (es.landsea_filename or "").strip() and picks["landsea_mask"]:
+            try:
+                name = _ingest_map(root, src / picks["landsea_mask"], transform="luminance")
+                _set_slot_filename(context, "landsea", name)
+                filled.append(f"landsea={name} (Lock Coastline on)")
+            except Exception as e:
+                notes.append(f"landsea decode failed: {e}")
 
         for slot in ("world_map", "landsea_mask"):
             if picks.get(slot):

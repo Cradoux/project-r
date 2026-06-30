@@ -166,9 +166,10 @@ class PP_PT_sphere(_PRPanel, Panel):
         s = context.scene.projection_pasta
         layout = self.layout
 
-        layout.operator("pp.load_world_map", text="Load World Map", icon="WORLD")
-        hm_label = f"Heightmap: {s.heightmap_filename}" if s.heightmap_filename else "Select Heightmap (optional)"
-        layout.operator("pp.select_heightmap", text=hm_label, icon="IMAGE_DATA")
+        # Map loading lives in the Map Inputs panel now (load the world map there to build
+        # the preview sphere). This panel is just face selection on the sphere.
+        if bpy.data.objects.get(s.sphere_object_name) is None:
+            layout.label(text="Load a World Map in Map Inputs", icon="INFO")
 
         row = layout.row(align=True)
         row.operator("pp.expand_selection", text="Expand", icon="ADD")
@@ -266,16 +267,16 @@ class PP_PT_erosion(_PRPanel, Panel):
         if es.lem_scale != "CUSTOM":
             col.prop(es, "lem_intensity", text="Intensity")
         col.prop(es, "erosion_strength")
+        col.prop(es, "enable_deposition")
+        if es.enable_deposition:
+            col.prop(es, "depo_v_s", text="Deposition Rate")
         col.separator()
         col.prop(es, "noise_kind", text="Seed Noise")
         col.prop(es, "noise_amp", text="Noise Amount")
 
-        # Rainfall map (optional): file picker + clear. Drives where incision concentrates.
-        rf_label = f"Rainfall: {es.rainfall_filename}" if es.rainfall_filename else "Rainfall Map (optional)"
-        row = layout.row(align=True)
-        row.operator("pp.select_rainfall", text=rf_label, icon="IMAGE_DATA")
-        if es.rainfall_filename:
-            row.operator("pp.select_rainfall", text="", icon="X").clear = True
+        # Rainfall is loaded in the Map Inputs panel; show what's active here.
+        rf = es.rainfall_filename or "uniform (set in Map Inputs)"
+        layout.label(text=f"Rainfall: {rf}", icon="IMAGE_DATA")
 
         col = layout.column()
         col.use_property_split = True
@@ -284,6 +285,7 @@ class PP_PT_erosion(_PRPanel, Panel):
             col.prop(es, "steps")
             col.prop(es, "k_sp", text="Erodibility (K)")
         col.prop(s, "output_resolution", text="Detail / Output Res")
+        col.prop(es, "seam_halo_px", text="Seam Halo")
         col.prop(es, "target_peak_m", text="Target Peak")
         # The "Erode Section" button lives in PP_PT_erosion_run (a header-less child
         # panel ordered last), so it sits BELOW the advanced sub-panels below.
@@ -391,9 +393,29 @@ class PP_PT_erosion_coastal(_PRPanel, Panel):
         layout.use_property_split = True
         layout.use_property_decorate = False
 
+        # --- Coastline handling (applies independently of the wave pass below) ---
+        box = layout.box()
+        box.use_property_split = True
+        box.use_property_decorate = False
+        box.prop(es, "lock_coastline")
+        sub = box.column()
+        sub.active = es.lock_coastline
+        ls_label = f"Land/Sea: {es.landsea_filename}" if es.landsea_filename else "Land/Sea Mask (optional)"
+        r = sub.row(align=True)
+        op = r.operator("pp.set_input_map", text=ls_label, icon="IMAGE_DATA")
+        op.slot = "landsea"; op.clear = False
+        if es.landsea_filename:
+            cl = r.operator("pp.set_input_map", text="", icon="X")
+            cl.slot = "landsea"; cl.clear = True
+        sub.label(text="Forces the input shore; neighbouring sections tile", icon="INFO")
+        box.prop(es, "shore_taper_m", text="Shore Taper")
+        layout.separator()
+
         layout.label(text="Reworks the coast before rivers carve", icon="MOD_OCEAN")
         col = layout.column()
-        col.active = es.enable_coastal
+        col.active = es.enable_coastal and not es.lock_coastline
+        if es.lock_coastline:
+            col.label(text="Disabled while Lock Coastline is on", icon="LOCKED")
         # Rate/Steps/Reach/Fetch follow the Scale x Intensity preset unless Scale = Custom.
         if es.lem_scale == "CUSTOM":
             col.prop(es, "coastal_rate_m", text="Erosion Rate")
@@ -442,7 +464,9 @@ class PP_PT_erosion_seafloor(_PRPanel, Panel):
         col.prop(es, "seafloor_shelf_relief_mod", text="Shelf vs Relief")
         col.prop(es, "seafloor_slope_width_km", text="Slope Width")
         col.separator()
-        col.prop(es, "seafloor_bathy_filename", text="Bathymetry Map")
+        # Bathymetry map is loaded in the Map Inputs panel; show status + the blend weight here.
+        bathy = es.seafloor_bathy_filename or "procedural (load a map in Map Inputs)"
+        col.label(text=f"Bathymetry: {bathy}", icon="IMAGE_DATA")
         sub = col.column()
         sub.active = es.enable_seafloor and bool((es.seafloor_bathy_filename or "").strip())
         sub.prop(es, "seafloor_input_weight", text="Map Weight")
