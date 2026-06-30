@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Dict, List, Tuple, Set
 
@@ -121,6 +122,214 @@ def _resample_image(
         )
     
     return output
+
+
+# ---------------------------------------------------------------------------
+# Geographic-pole repair (Bug: streaky/transparent band at the top of polar sections)
+# ---------------------------------------------------------------------------
+# A geographic pole is a SINGLE point in Hammer space, so during Hammer->equirect
+# reassembly the equirect rows nearest a pole all map to a tiny disk of the Hammer crop
+# -> that disk is magnified to fill the whole top/bottom band. Two artifacts result:
+#   (a) the effective mask's UV-singularity "starburst" of uncovered spokes at the pole
+#       becomes a transparent/checkerboard gap band, and
+#   (b) the extreme magnification combs the RGB into comma/dash streaks.
+# We repair (a) by filling the pole-neighborhood disk in the (Hammer crop-space) mask
+# before reprojection, and (b) by collapsing the magnified equirect rows toward their
+# mask-weighted row average after reprojection. Both are no-ops for non-polar sections.
+POLE_CAP_DEG = 6.0  # treat the spherical cap within this colatitude of a pole
+
+
+def _get_pp():
+    from ..vendor.projectionpasta import projectionpasta as pp  # type: ignore
+
+    return pp
+
+
+def _hammer_forward_px(pp, lon_deg: float, lat_deg: float, center, full_w: int, full_h: int):
+    """Forward-project a lon/lat (deg) to pixel coords on the section's Hammer full canvas."""
+    aspect = np.array(
+        [math.radians(center[0]), math.radians(center[1]), math.radians(center[2])],
+        dtype=np.float64,
+    )
+    lon_r, lat_r = pp.Rotate_to(
+        np.array([math.radians(lon_deg)]), np.array([math.radians(lat_deg)]), aspect
+    )
+    opts = dict(pp.def_opts)
+    opts["in"] = False
+    hx, hy = pp.posl["Hammer"](lon_r, lat_r, opts)  # [-1, 1]
+    fx = (float(hx[0]) + 1.0) / 2.0 * full_w - 0.5
+    fy = (1.0 - float(hy[0])) / 2.0 * full_h - 0.5
+    return fx, fy
+
+
+def _colat_to_crop_radius(pp, center, full_w, full_h, rect_x, rect_y, cx, cy, is_north, colat_deg):
+    """Max crop-space distance from the pole point to the colatitude circle (handles
+    Hammer distortion: the cap is an ellipse, so we take the outer extent)."""
+    pole_lat = 90.0 if is_north else -90.0
+    edge_lat = pole_lat - colat_deg if is_north else pole_lat + colat_deg
+    rmax = 0.0
+    for lon in range(0, 360, 30):
+        try:
+            ex, ey = _hammer_forward_px(pp, float(lon), edge_lat, center, full_w, full_h)
+        except Exception:
+            continue
+        d = math.hypot((ex - rect_x) - cx, (ey - rect_y) - cy)
+        if math.isfinite(d):
+            rmax = max(rmax, d)
+    return rmax
+
+
+def _detect_pole_fill_radius(mask: np.ndarray, cx: float, cy: float, max_r: float) -> float:
+    """Radius (crop px) out to which the pole neighbourhood should be solidified.
+
+    Around a pole-covering cap the effective mask is feathered LOW (the UV-singularity
+    'starburst' spokes act as nearby boundaries, so generate_effective_mask fades the
+    whole pole region down even where it is 'covered'). The artifact band is exactly this
+    feathered/spoked region; it ends at the INNER EDGE of the truly-solid cap interior
+    (mask value >= 0.9). We return that radius (everything inside is genuine cap interior
+    and should be solid). For a small cap with no solid interior, we stop at the cap
+    boundary (coverage falls away) instead. Returns 0 if there's no covered core."""
+    h, w = mask.shape[:2]
+    yy, xx = np.mgrid[0:h, 0:w]
+    dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+    max_r = float(max(8.0, min(max_r, math.hypot(w, h))))
+    nb = 64
+    ring = np.clip((dist / max_r * nb).astype(np.int64), 0, nb - 1)
+    cnt = np.bincount(ring.ravel(), minlength=nb).astype(np.float64)
+    solid = np.bincount(ring.ravel(), weights=(mask >= 0.9).ravel().astype(np.float64), minlength=nb)
+    covd = np.bincount(ring.ravel(), weights=(mask > 0.01).ravel().astype(np.float64), minlength=nb)
+    f_solid = np.where(cnt > 0, solid / np.maximum(cnt, 1.0), 0.0)
+    f_cov = np.where(cnt > 0, covd / np.maximum(cnt, 1.0), 0.0)
+    ring_w = max_r / nb
+    if cnt[0] == 0 or f_cov[0] < 0.1:
+        return 0.0
+    r_fill = ring_w
+    for i in range(nb):
+        if cnt[i] == 0 or f_cov[i] < 0.05:
+            break  # reached the cap boundary (small cap) -> stop here
+        # Inner edge of the solid cap interior: ring is solid and stays solid.
+        if f_solid[i] >= 0.9 and np.all(f_solid[i : min(i + 3, nb)] >= 0.85):
+            break
+        r_fill = (i + 1) * ring_w
+    return r_fill
+
+
+def _seal_pole_starburst(
+    effective_mask_crop: np.ndarray,
+    coverage_for_extend: np.ndarray,
+    *,
+    params: ProjectionParams,
+    full_w: int,
+    full_h: int,
+    rect_x: int,
+    rect_y: int,
+    w: int,
+    h: int,
+    gh: int,
+    cap_deg: float = POLE_CAP_DEG,
+) -> List[Tuple[bool, int]]:
+    """Fill the pole-neighborhood disk in the crop-space mask when the section covers a
+    geographic pole. The disk radius adapts to the actual UV-singularity 'starburst'
+    extent (resolution-independent). Returns a list of (is_north, band_rows) for the
+    equirect collapse step; empty (and no mutation) when the section touches no pole."""
+    try:
+        pp = _get_pp()
+    except Exception:
+        return []
+    center = (params.center_lon_deg, params.center_lat_deg, params.rot_deg)
+    sealed: List[Tuple[bool, int]] = []
+    yy = xx = None  # allocated lazily, only once a pole is found inside the crop
+    for is_north in (True, False):
+        pole_lat = 90.0 if is_north else -90.0
+        try:
+            fx, fy = _hammer_forward_px(pp, 0.0, pole_lat, center, full_w, full_h)
+        except Exception:
+            continue
+        cx, cy = fx - rect_x, fy - rect_y
+        if not (0.0 <= cx < w and 0.0 <= cy < h):
+            continue  # this pole is not inside the crop
+        if yy is None:
+            yy, xx = np.mgrid[0:h, 0:w]
+
+        # Search radius cap: a generous colatitude so detection has room to find the
+        # solid interior even for coarse sections, but never the whole crop.
+        search_r = _colat_to_crop_radius(
+            pp, center, full_w, full_h, rect_x, rect_y, cx, cy, is_north, 6.0 * cap_deg
+        )
+        fill_r = _detect_pole_fill_radius(effective_mask_crop, cx, cy, search_r or min(w, h) / 2.0)
+        # Floor at the cap_deg radius so we always seal at least the immediate pole, and
+        # pad a touch to swallow the ragged inner edge of the solid cap.
+        floor_r = _colat_to_crop_radius(
+            pp, center, full_w, full_h, rect_x, rect_y, cx, cy, is_north, cap_deg
+        )
+        disk_r = max(floor_r, fill_r * 1.1)
+        if disk_r < 1.0:
+            continue
+
+        disk = (xx - cx) ** 2 + (yy - cy) ** 2 <= disk_r * disk_r
+        if disk.sum() == 0:
+            continue
+        # Guard: only seal a genuine pole-COVERING cap, never a high-latitude section
+        # whose rectangular crop merely contains the pole pixel, or a wedge that reaches
+        # the pole along some longitudes only. A real cap wraps the pole in every
+        # direction, so require coverage present in most angular sectors around it (the
+        # spokes still leave each sector partly covered) and a reasonable overall mean.
+        covered = disk & (effective_mask_crop > 0.01)
+        if float(covered[disk].mean()) < 0.2:  # coverage FRACTION, not feathered value
+            continue
+        ang = np.arctan2(yy[covered] - cy, xx[covered] - cx)
+        sectors = np.unique(((ang + math.pi) / (2.0 * math.pi) * 8).astype(np.int64) % 8)
+        if sectors.size < 6:  # coverage only on one side -> wedge/edge, not a cap
+            continue
+        effective_mask_crop[disk] = 1.0
+        coverage_for_extend[disk] = 1.0
+
+        # Collapse band = equirect rows the disk projects to. The disk reaches out to a
+        # colatitude whose row index is colat/180*gh; find that colatitude by inverting
+        # the colat->radius mapping, then pad slightly so the collapse covers the band.
+        colat = cap_deg
+        th = 0.5
+        while th <= 4.0 * cap_deg:
+            r_th = _colat_to_crop_radius(
+                pp, center, full_w, full_h, rect_x, rect_y, cx, cy, is_north, th
+            )
+            if r_th >= disk_r:
+                colat = th
+                break
+            colat = th
+            th += 0.5
+        # Pad the band so the faded RGB collapse comfortably covers the sealed footprint
+        # (the alpha is already solid out to the disk; the extra rows just fade to 0).
+        band_rows = max(1, int(round(colat / 180.0 * gh * 1.3)))
+        sealed.append((is_north, band_rows))
+    return sealed
+
+
+def _collapse_pole_rows(
+    img_eq: np.ndarray,
+    mask_eq: np.ndarray,
+    sealed: List[Tuple[bool, int]],
+    *,
+    gh: int,
+    gamma: float = 2.0,
+) -> None:
+    """Blend each magnified near-pole equirect row toward its mask-weighted row average.
+    Geographically a near-pole row is ~a single point, so this removes the longitudinal
+    comb/streak aliasing while preserving the cap colour. Strength fades to 0 at the band
+    edge. Operates in place on img_eq."""
+    for is_north, band in sealed:
+        band = min(band, gh)
+        for i in range(band):
+            r = i if is_north else (gh - 1 - i)
+            w_blend = (1.0 - i / float(band)) ** gamma
+            if w_blend <= 0.0:
+                continue
+            m = mask_eq[r, :, 0]
+            cov = m > 0.01
+            if int(cov.sum()) < 5:
+                continue
+            avg = img_eq[r][cov].mean(axis=0)
+            img_eq[r] = (1.0 - w_blend) * img_eq[r] + w_blend * avg[None, :]
 
 
 class PP_OT_reassemble(bpy.types.Operator):
@@ -273,6 +482,22 @@ class PP_OT_reassemble(bpy.types.Operator):
                     warnings.append(f"{sec_id}/{fname}: failed to load - {e}")
                     continue
 
+                # Users routinely re-export the crop at a different resolution in their
+                # erosion/painting tool (Gaea/Wilbur even per section_info.txt's "Upscaled
+                # Suggestions"), so the processed file rarely matches the manifest crop rect.
+                # Everything downstream (mask, paste, extend_nearest_valid) is indexed at the
+                # rect size, so resample the processed crop back to (w, h) here. Without this,
+                # extend_nearest_valid silently samples only the rect-sized top-left corner of
+                # an oversized image (pure Hammer background) -> a completely empty output.
+                if crop_img.width != w or crop_img.height != h:
+                    resized = imaging.resize_to(
+                        crop_img.pixels, w, h,
+                        interp="nearest" if is_mask else "linear",
+                    )
+                    crop_img = imaging.ImageBuffer(
+                        width=w, height=h, channels=resized.shape[2], pixels=resized,
+                    )
+
                 if channels == 0:
                     channels = crop_img.channels
 
@@ -303,6 +528,14 @@ class PP_OT_reassemble(bpy.types.Operator):
                     # No mask info, use all-ones (backward compat)
                     effective_mask_crop = np.ones((h, w), dtype=np.float32)
                     coverage_for_extend = np.ones((h, w), dtype=np.float32)
+
+                # Repair the geographic-pole singularity in the crop-space mask (no-op
+                # unless this section actually covers a pole). See _seal_pole_starburst.
+                sealed_poles = _seal_pole_starburst(
+                    effective_mask_crop, coverage_for_extend,
+                    params=params, full_w=full_w, full_h=full_h,
+                    rect_x=x, rect_y=y, w=w, h=h, gh=gh,
+                )
 
                 # Apply nearest-valid extension to processed image
                 crop_pixels = crop_img.pixels
@@ -380,6 +613,11 @@ class PP_OT_reassemble(bpy.types.Operator):
                 mask_eq = mask_eq[:, :, :1].astype("float32")
                 if mask_eq.ndim == 2:
                     mask_eq = mask_eq[..., None]
+
+                # Collapse the magnified pole rows to remove comb/streak aliasing
+                # (no-op unless this section covers a pole). See _collapse_pole_rows.
+                if sealed_poles:
+                    _collapse_pole_rows(img_eq, mask_eq, sealed_poles, gh=gh)
 
                 # Save individual section layer with transparency
                 # Combine RGB(A) with mask as alpha for Photoshop layering
