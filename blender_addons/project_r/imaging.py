@@ -203,7 +203,15 @@ def paste_into(
     dst = np.zeros((dst_h, dst_w, dst_channels), dtype=np.float32)
     # If channels mismatch, copy min(C)
     c = min(dst_channels, src.channels)
-    dst[y : y + h, x : x + w, :c] = src.pixels[:h, :w, :c]
+    # Clamp the paste to the destination bounds. Independent rounding of scaled rect /
+    # canvas sizes (resolution-normalization path) can make x+w or y+h overrun dst by a
+    # pixel; without clamping the assignment below raises a broadcast error and aborts.
+    x0, y0 = max(0, x), max(0, y)
+    cw = max(0, min(w - (x0 - x), dst_w - x0))
+    ch = max(0, min(h - (y0 - y), dst_h - y0))
+    if cw > 0 and ch > 0:
+        src_y0, src_x0 = y0 - y, x0 - x
+        dst[y0 : y0 + ch, x0 : x0 + cw, :c] = src.pixels[src_y0 : src_y0 + ch, src_x0 : src_x0 + cw, :c]
     if dst_channels == 4 and src.channels < 4:
         dst[..., 3] = 1.0
     return ImageBuffer(width=dst_w, height=dst_h, channels=dst_channels, pixels=dst)
@@ -643,6 +651,15 @@ def extend_nearest_valid(
         Filled image with same shape as input
     """
     cov_2d = coverage.squeeze() if coverage.ndim > 2 else coverage
+
+    # Guard against the silent failure mode that caused empty reassembly output: the
+    # nearest-valid lookup below indexes `image` with coordinates from the coverage grid,
+    # so a size mismatch would sample only image's top-left corner instead of erroring.
+    if image.shape[:2] != cov_2d.shape[:2]:
+        raise ValueError(
+            f"extend_nearest_valid: image {image.shape[:2]} != coverage {cov_2d.shape[:2]}"
+        )
+
     valid_mask = (cov_2d >= 0.5).astype(np.uint8)
 
     # If all valid, nothing to do
@@ -669,6 +686,40 @@ def resize_half(arr: np.ndarray) -> np.ndarray:
         return arr[:h2 * 2, :w2 * 2].reshape(h2, 2, w2, 2).mean(axis=(1, 3)).astype(arr.dtype)
     else:
         return arr[:h2 * 2, :w2 * 2].reshape(h2, 2, w2, 2, -1).mean(axis=(1, 3)).astype(arr.dtype)
+
+
+def resize_to(arr: np.ndarray, out_w: int, out_h: int, *, interp: str = "linear") -> np.ndarray:
+    """
+    Resample a float image (H, W) or (H, W, C) to an exact (out_h, out_w) size.
+
+    interp="nearest" preserves hard label/mask values; anything else uses bilinear.
+    Returns a (out_h, out_w, C) float32 array. No-op (copy) if already the target size.
+    """
+    if arr.ndim == 2:
+        arr = arr[..., None]
+    h, w, c = arr.shape
+    out_w = max(1, int(out_w))
+    out_h = max(1, int(out_h))
+    if (w, h) == (out_w, out_h):
+        return arr.astype(np.float32, copy=True)
+
+    try:
+        from PIL import Image as PILImage  # type: ignore
+    except ImportError:
+        # Pure-numpy fallback: nearest-neighbour sampling.
+        ys = np.clip((np.arange(out_h) * (h / out_h)).astype(np.int64), 0, h - 1)
+        xs = np.clip((np.arange(out_w) * (w / out_w)).astype(np.int64), 0, w - 1)
+        return arr[ys][:, xs].astype(np.float32)
+
+    resample = PILImage.NEAREST if interp == "nearest" else PILImage.BILINEAR
+    chans = []
+    for ci in range(c):
+        ch = arr[:, :, ci].astype(np.float32)
+        # Encode to uint16 for precision, resize, decode back to [0,1] float.
+        u16 = (np.clip(ch, 0.0, 1.0) * 65535.0 + 0.5).astype(np.uint16)
+        im = PILImage.fromarray(u16, mode="I;16").resize((out_w, out_h), resample=resample)
+        chans.append(np.asarray(im).astype(np.float32) / 65535.0)
+    return np.stack(chans, axis=-1)
 
 
 def resize_double_bilinear(arr: np.ndarray) -> np.ndarray:
