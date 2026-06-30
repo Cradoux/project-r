@@ -297,6 +297,41 @@ class ProjectionPastaProjectSettings(PropertyGroup):
         default=True,
     )
 
+    # Target output resolution (longest edge) for processed section maps + the
+    # in-Blender erosion detail, and the reassembled global map. One quality knob.
+    output_resolution: EnumProperty(  # type: ignore[valid-type]
+        name="Output Resolution",
+        description="Per-SECTION longest-edge pixel size: the exported section crops and the "
+                    "in-Blender erosion detail. 'Auto' picks a balanced size for the section; "
+                    "higher = finer detail, but erosion time scales ~linearly with pixel count. "
+                    "(The reassembled global map size is set separately under Reassembly.)",
+        items=[
+            ("AUTO", "Auto (optimal)", "A balanced size derived from the section's native resolution"),
+            ("512", "512 px", "512 px longest edge"),
+            ("1024", "1024 px", "1024 px longest edge"),
+            ("2048", "2048 px", "2048 px longest edge (slow erosion)"),
+            ("4096", "4096 px", "4096 px longest edge (very slow erosion)"),
+            ("8192", "8192 px", "8192 px longest edge (extremely slow erosion)"),
+        ],
+        default="AUTO",
+    )
+
+    # Final reassembled global map size -- a GLOBAL (world-scale) resolution, kept
+    # separate from the per-section output_resolution so a per-section detail choice
+    # can never silently shrink the world deliverable.
+    reassembly_resolution: EnumProperty(  # type: ignore[valid-type]
+        name="Reassembly Resolution",
+        description="Longest-edge pixel size of the final reassembled global equirectangular map. "
+                    "'Auto' keeps the loaded world map's size",
+        items=[
+            ("AUTO", "Auto (world size)", "Use the loaded world map's resolution"),
+            ("4096", "4096 px", "4096 px longest edge"),
+            ("8192", "8192 px", "8192 px longest edge"),
+            ("16384", "16384 px", "16384 px longest edge"),
+        ],
+        default="AUTO",
+    )
+
     # Paths derived
     def project_root_path(self) -> Optional[Path]:
         # Guard on the RAW field: bpy.path.abspath("") resolves to a non-empty path
@@ -338,17 +373,52 @@ class ProjectionPastaErosionSettings(PropertyGroup):
                     "current erosion settings below",
         default=False,
     )
-    max_work_px: IntProperty(  # type: ignore[valid-type]
-        name="Max Work Resolution (px)",
-        description="Downsample the crop to at most this size before eroding, then upscale the result "
-                    "(keeps Blender responsive on large crops). Erosion is blocking and scales ~linearly "
-                    "with pixel count: ~2 min at 256 px, ~7 min at 512 px, ~30 min at 1024 px for 200 "
-                    "steps. 256-512 already carves crisp drainage. 0 = erode at native resolution",
-        default=512,
-        min=0,
-        soft_max=4096,
-    )
 
+    # --- Presets (scale x intensity) -------------------------------------
+    lem_scale: EnumProperty(  # type: ignore[valid-type]
+        name="Scale",
+        description="Physical scale preset. 'Auto' tunes the physics to the section's real-world "
+                    "size; 'Custom' exposes every parameter for manual control",
+        items=[
+            ("AUTO", "Auto (by size)", "Pick the scale band from the section's km extent"),
+            ("LOCAL", "Local (<500 km)", "Local-scale physics"),
+            ("REGIONAL", "Regional (<1500 km)", "Regional-scale physics"),
+            ("CONTINENTAL", "Continental (<4000 km)", "Continental-scale physics"),
+            ("SUPER", "Supercontinental", "Supercontinental-scale physics"),
+            ("CUSTOM", "Custom", "Use the manual parameters below instead of a preset"),
+        ],
+        default="AUTO",
+    )
+    lem_intensity: EnumProperty(  # type: ignore[valid-type]
+        name="Intensity",
+        description="How developed the river network gets. Lower = subtler drainage that keeps more "
+                    "of the original terrain",
+        items=[
+            ("GENTLE", "Gentle", "Fewer steps, softer incision"),
+            ("MODERATE", "Moderate", "Balanced"),
+            ("STRONG", "Strong", "More steps, deeper incision"),
+        ],
+        default="MODERATE",
+    )
+    erosion_strength: FloatProperty(  # type: ignore[valid-type]
+        name="Erosion Strength",
+        description="Blend the eroded result back toward your original heightmap. 1.0 = full "
+                    "erosion; lower keeps more of the input shape (the direct cure for an "
+                    "over-eroded look). Ocean is always preserved regardless",
+        default=0.7,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+    sea_level_m: FloatProperty(  # type: ignore[valid-type]
+        name="Sea Level (m)",
+        description="Cells at or below this elevation are treated as ocean: pinned as a fixed "
+                    "base level the rivers drain into, never uplifted or eroded, and restored "
+                    "unchanged afterwards. 0 matches a pure-black ocean",
+        default=0.0,
+        soft_min=-1000.0,
+        soft_max=2000.0,
+    )
     # --- Seed conditioning (breaks D8 grid-bias -> meandering channels) ---
     noise_kind: EnumProperty(  # type: ignore[valid-type]
         name="Seed Noise",
@@ -364,11 +434,13 @@ class ProjectionPastaErosionSettings(PropertyGroup):
     )
     noise_amp: FloatProperty(  # type: ignore[valid-type]
         name="Noise Amount",
-        description="Conditioning-noise amplitude in 30 m units. ~0.5-0.6 breaks the grid while "
-                    "keeping the macro form; 1.0 swamps it",
+        description="Seed-conditioning noise as a fraction of the terrain's relief (scales with "
+                    "terrain height, so it works at any elevation). ~0.5 perturbs the drainage while "
+                    "keeping the macro form; higher reshapes it more. Change the Noise Seed for a "
+                    "different river pattern",
         default=0.55,
         min=0.0,
-        soft_max=2.0,
+        soft_max=3.0,
     )
     noise_seed: IntProperty(  # type: ignore[valid-type]
         name="Noise Seed",
@@ -377,24 +449,13 @@ class ProjectionPastaErosionSettings(PropertyGroup):
         min=0,
     )
 
-    # --- Climate forcing (right erosion in the right place) ---
-    climate_kind: EnumProperty(  # type: ignore[valid-type]
-        name="Climate",
-        description="Per-node rainfall field that drives discharge so incision concentrates where it rains",
-        items=[
-            ("uniform", "Uniform", "Even rainfall everywhere"),
-            ("tropical", "Tropical Bands", "Wet equatorial + mid-latitude bands (Hadley-ish)"),
-            ("gradient", "Gradient", "Wet on one side fading to dry on the other"),
-            ("orographic", "Orographic", "Wet windward + sharp rain shadow (strongest wet/dry contrast)"),
-        ],
-        default="uniform",
-    )
-    climate_strength: FloatProperty(  # type: ignore[valid-type]
-        name="Climate Strength",
-        description="Scales the rainfall contrast away from uniform (0 = flat, 1 = full pattern)",
-        default=1.0,
-        min=0.0,
-        soft_max=3.0,
+    # --- Rainfall map (optional per-node runoff that drives where incision concentrates) ---
+    rainfall_filename: StringProperty(  # type: ignore[valid-type]
+        name="Rainfall Map",
+        description="Filename of a rainfall/precipitation image in source/ (brighter = wetter) used "
+                    "to drive erosion. The section's crop of it is used; leave empty for uniform "
+                    "rainfall. Auto-detected if a source map is named with 'rain'/'precip'",
+        default="",
     )
 
     # --- Stream-power LEM parameters ---
@@ -455,8 +516,10 @@ class ProjectionPastaErosionSettings(PropertyGroup):
     # --- Multi-scale blur overlay (flat-bottomed channels) ---
     enable_overlay: BoolProperty(  # type: ignore[valid-type]
         name="Channel Overlay",
-        description="Engrave flat-bottomed channels onto the eroded surface with a LIGHT, fine-pass "
-                    "multi-scale blur overlay (preserves drainage concavity; a deep overlay would destroy it)",
+        description="Engrave flat-bottomed, MEANDERING channels onto the eroded surface using a "
+                    "multi-flow router (off-grid, unlike the D8 stream-power pass) plus a light "
+                    "multi-scale blur. This is what makes rivers curve instead of snapping to the "
+                    "grid; keep it light so it preserves the drainage concavity",
         default=False,
     )
     overlay_depth_m: FloatProperty(  # type: ignore[valid-type]
@@ -480,6 +543,78 @@ class ProjectionPastaErosionSettings(PropertyGroup):
         default=0.4,
         min=0.1,
         max=0.9,
+    )
+
+    # --- Coastal (wave) erosion (runs BEFORE the LEM; reworks the coastline) ---
+    enable_coastal: BoolProperty(  # type: ignore[valid-type]
+        name="Coastal Erosion",
+        description="Rework the shoreline with wave energy BEFORE carving rivers: exposed headlands "
+                    "(long fetch over open water) erode into cliffs and retreat, while the removed "
+                    "sediment is redeposited as beaches in sheltered bays. Unlike the river stage, "
+                    "this actively MOVES the coastline (the river stage keeps it fixed)",
+        default=False,
+    )
+    coastal_rate_m: FloatProperty(  # type: ignore[valid-type]
+        name="Wave Erosion Rate (m)",
+        description="Max vertical lowering per step at the most wave-exposed waterline cell. Higher "
+                    "= faster cliff retreat",
+        default=3.0,
+        min=0.0,
+        soft_max=30.0,
+    )
+    coastal_steps: IntProperty(  # type: ignore[valid-type]
+        name="Coastal Steps",
+        description="Wave-erosion iterations. More steps = more coastline retreat and smoother bays",
+        default=25,
+        min=1,
+        soft_max=200,
+    )
+    coastal_notch_m: FloatProperty(  # type: ignore[valid-type]
+        name="Wave Reach (m)",
+        description="How far up the cliff face waves bite, above sea level. Larger = taller cliffs "
+                    "attacked per step",
+        default=20.0,
+        min=0.5,
+        soft_max=200.0,
+    )
+    coastal_max_fetch_km: FloatProperty(  # type: ignore[valid-type]
+        name="Max Fetch (km)",
+        description="Open-water distance past which extra fetch no longer adds wave energy. Also "
+                    "caps cost: compute scales with fetch / cell size",
+        default=25.0,
+        min=1.0,
+        soft_max=200.0,
+    )
+    coastal_swell_focus: FloatProperty(  # type: ignore[valid-type]
+        name="Swell Focus",
+        description="How directional the wave climate is. 0 = waves from all directions (coasts "
+                    "erode evenly); 1 = a dominant swell from 'Swell Direction' dominates",
+        default=0.0,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+    coastal_swell_deg: FloatProperty(  # type: ignore[valid-type]
+        name="Swell Direction",
+        description="Compass bearing the dominant swell comes FROM (0=N, 90=E, 180=S, 270=W). Only "
+                    "matters when Swell Focus > 0",
+        default=270.0,
+        min=0.0,
+        max=360.0,
+    )
+    coastal_talus_deg: FloatProperty(  # type: ignore[valid-type]
+        name="Cliff Collapse (deg)",
+        description="Talus angle for undercut cliff faces near the coast: steeper-than-this faces "
+                    "collapse so tall cliffs retreat instead of standing vertical. 0 = off",
+        default=0.0,
+        min=0.0,
+        max=89.0,
+    )
+    coastal_deposition: BoolProperty(  # type: ignore[valid-type]
+        name="Build Beaches",
+        description="Redeposit eroded sediment as beaches in sheltered shallow water (mass-"
+                    "conserving). Off = pure erosion, sediment lost offshore",
+        default=True,
     )
 
     # --- Output ---

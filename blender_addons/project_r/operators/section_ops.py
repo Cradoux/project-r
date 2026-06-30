@@ -12,6 +12,7 @@ import numpy as np
 import random
 
 from .. import deps
+from .. import erosion
 from .. import geo
 from .. import imaging
 from .. import layers
@@ -838,6 +839,17 @@ class PP_OT_create_section(bpy.types.Operator):
         # busy cursor + status-bar progress, and on failure remove the partial
         # section folders and report cleanly instead of throwing raw mid-write and
         # leaving an orphan section directory with no manifest entry.
+        # Output resolution for exported crops (longest edge). AUTO keeps the native
+        # crop size (full source detail); an explicit size resamples each crop.
+        native_long = max(int(rect.w), int(rect.h))
+        if str(s.output_resolution) == "AUTO":
+            export_res = native_long
+        else:
+            try:
+                export_res = int(s.output_resolution)
+            except (TypeError, ValueError):
+                export_res = native_long
+
         win = context.window
         wm = context.window_manager
         win.cursor_set("WAIT")
@@ -871,6 +883,16 @@ class PP_OT_create_section(bpy.types.Operator):
 
                 full_img = imaging.load_image(full_path)
                 crop_img = imaging.crop(full_img, rect.x, rect.y, rect.w, rect.h)
+                # Resample to the chosen output resolution (longest edge), preserving
+                # aspect and the layer's interpolation (nearest for masks).
+                if export_res != native_long and native_long > 0:
+                    sc = export_res / float(native_long)
+                    nw = max(1, int(round(rect.w * sc)))
+                    nh = max(1, int(round(rect.h * sc)))
+                    rp = imaging.resize_to(crop_img.pixels, nw, nh, interp=interp)
+                    if rp.ndim == 2:
+                        rp = rp[..., None]
+                    crop_img = imaging.ImageBuffer(width=nw, height=nh, channels=rp.shape[2], pixels=rp)
                 # Save crop with same format as full_path
                 fmt, depth = (
                     ("OPEN_EXR", "32")
@@ -1078,9 +1100,13 @@ class PP_OT_create_section(bpy.types.Operator):
         except Exception:
             pass
 
+        # Suggest the balanced erosion/output resolution for this selection so the
+        # user can pick a sensible Output Resolution (AUTO already uses it).
+        suggested_res = erosion.suggest_resolution(native_long)
         self.report(
             {"INFO"},
-            f"Created section '{s.new_section_name}' - {extent_width_km:.0f} x {extent_height_km:.0f} km ({km_per_pixel:.2f} km/pixel)",
+            f"Created section '{s.new_section_name}' - {extent_width_km:.0f} x {extent_height_km:.0f} km "
+            f"({km_per_pixel:.2f} km/pixel), crop {native_long}px (auto erode ≈{suggested_res}px)",
         )
 
         # Optionally erode it right away, targeting this exact id (no last-section

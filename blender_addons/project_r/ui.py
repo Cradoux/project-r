@@ -107,6 +107,7 @@ class PP_PT_section(_PRPanel, Panel):
         col.prop(s, "new_section_name", text="Name")
         col.prop(s, "square_crop")
         col.prop(s, "feather_px", text="Feather")
+        col.prop(s, "output_resolution")
         col.prop(es, "erode_on_create")
 
         row = layout.row()
@@ -151,6 +152,7 @@ class PP_PT_erosion(_PRPanel, Panel):
 
     def draw(self, context: bpy.types.Context) -> None:
         es = context.scene.projection_pasta_erosion
+        s = context.scene.projection_pasta
         layout = self.layout
 
         if not deps.landlab_available():
@@ -167,29 +169,31 @@ class PP_PT_erosion(_PRPanel, Panel):
         col.use_property_decorate = False
         col.prop(es, "section")
         col.separator()
+        col.prop(es, "lem_scale", text="Scale")
+        if es.lem_scale != "CUSTOM":
+            col.prop(es, "lem_intensity", text="Intensity")
+        col.prop(es, "erosion_strength")
+        col.separator()
         col.prop(es, "noise_kind", text="Seed Noise")
         col.prop(es, "noise_amp", text="Noise Amount")
-        col.separator()
-        col.prop(es, "climate_kind", text="Climate")
-        col.prop(es, "climate_strength", text="Strength")
-        col.separator()
-        col.prop(es, "steps")
-        col.prop(es, "k_sp", text="Erodibility (K)")
-        col.prop(es, "max_work_px", text="Max Work Res")
+
+        # Rainfall map (optional): file picker + clear. Drives where incision concentrates.
+        rf_label = f"Rainfall: {es.rainfall_filename}" if es.rainfall_filename else "Rainfall Map (optional)"
+        row = layout.row(align=True)
+        row.operator("pp.select_rainfall", text=rf_label, icon="IMAGE_DATA")
+        if es.rainfall_filename:
+            row.operator("pp.select_rainfall", text="", icon="X").clear = True
+
+        col = layout.column()
+        col.use_property_split = True
+        col.use_property_decorate = False
+        if es.lem_scale == "CUSTOM":
+            col.prop(es, "steps")
+            col.prop(es, "k_sp", text="Erodibility (K)")
+        col.prop(s, "output_resolution", text="Detail / Output Res")
         col.prop(es, "target_peak_m", text="Target Peak")
-
-        row = layout.row()
-        row.scale_y = 1.4
-        row.operator("pp.erode_section", text="Erode Section", icon="MOD_FLUIDSIM")
-
-        if es.last_report:
-            box = layout.box()
-            ok = (0.4 <= es.last_theta <= 0.55) and (es.last_r2 > 0.9)
-            box.label(
-                text=f"theta={es.last_theta:.2f}  R2={es.last_r2:.2f}  band={es.last_band_slope:.3f}",
-                icon="CHECKMARK" if ok else "INFO",
-            )
-            box.label(text=f"{es.last_router}   {es.last_secs:.1f}s")
+        # The "Erode Section" button lives in PP_PT_erosion_run (a header-less child
+        # panel ordered last), so it sits BELOW the advanced sub-panels below.
 
 
 class PP_PT_erosion_lem(_PRPanel, Panel):
@@ -208,12 +212,16 @@ class PP_PT_erosion_lem(_PRPanel, Panel):
         layout.use_property_split = True
         layout.use_property_decorate = False
         col = layout.column()
-        col.prop(es, "m_sp")
-        col.prop(es, "n_sp")
-        col.prop(es, "diffusivity")
-        col.prop(es, "uplift")
-        col.prop(es, "dt")
+        col.prop(es, "sea_level_m", text="Sea Level")
         col.prop(es, "noise_seed")
+        # Stream-power physics only apply when Scale = Custom; presets set them.
+        if es.lem_scale == "CUSTOM":
+            col.separator()
+            col.prop(es, "m_sp")
+            col.prop(es, "n_sp")
+            col.prop(es, "diffusivity")
+            col.prop(es, "uplift")
+            col.prop(es, "dt")
 
 
 class PP_PT_erosion_overlay(_PRPanel, Panel):
@@ -241,6 +249,78 @@ class PP_PT_erosion_overlay(_PRPanel, Panel):
         col.prop(es, "overlay_r", text="Blur Ratio")
 
 
+class PP_PT_erosion_coastal(_PRPanel, Panel):
+    bl_label = "Coastal Erosion"
+    bl_idname = "PP_PT_erosion_coastal"
+    bl_parent_id = "PP_PT_erosion"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return deps.landlab_available()
+
+    def draw_header(self, context: bpy.types.Context) -> None:
+        self.layout.prop(context.scene.projection_pasta_erosion, "enable_coastal", text="")
+
+    def draw(self, context: bpy.types.Context) -> None:
+        es = context.scene.projection_pasta_erosion
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        layout.label(text="Reworks the coast before rivers carve", icon="MOD_OCEAN")
+        col = layout.column()
+        col.active = es.enable_coastal
+        # Rate/Steps/Reach/Fetch follow the Scale x Intensity preset unless Scale = Custom.
+        if es.lem_scale == "CUSTOM":
+            col.prop(es, "coastal_rate_m", text="Erosion Rate")
+            col.prop(es, "coastal_steps", text="Steps")
+            col.prop(es, "coastal_notch_m", text="Wave Reach")
+            col.prop(es, "coastal_max_fetch_km", text="Max Fetch")
+        else:
+            col.label(text="Rate / Steps / Reach / Fetch auto-sized by Scale", icon="INFO")
+        col.separator()
+        col.prop(es, "coastal_deposition", text="Build Beaches")
+        col.prop(es, "coastal_talus_deg", text="Cliff Collapse")
+        col.separator()
+        col.prop(es, "coastal_swell_focus", text="Swell Focus")
+        sub = col.column()
+        sub.active = es.enable_coastal and es.coastal_swell_focus > 0.0
+        sub.prop(es, "coastal_swell_deg", text="Swell Direction")
+
+
+class PP_PT_erosion_run(_PRPanel, Panel):
+    # The Erode button + last-run readout. A header-less child panel with the highest
+    # bl_order so it renders AFTER the Advanced LEM / Channel Overlay / Coastal
+    # sub-panels -- i.e. the button sits at the very bottom of the Erosion section.
+    bl_label = "Run Erosion"
+    bl_idname = "PP_PT_erosion_run"
+    bl_parent_id = "PP_PT_erosion"
+    bl_order = 100
+    bl_options = {"HIDE_HEADER"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return deps.landlab_available()
+
+    def draw(self, context: bpy.types.Context) -> None:
+        es = context.scene.projection_pasta_erosion
+        layout = self.layout
+
+        row = layout.row()
+        row.scale_y = 1.4
+        row.operator("pp.erode_section", text="Erode Section", icon="MOD_FLUIDSIM")
+
+        if es.last_report:
+            box = layout.box()
+            ok = (0.4 <= es.last_theta <= 0.55) and (es.last_r2 > 0.9)
+            box.label(
+                text=f"theta={es.last_theta:.2f}  R2={es.last_r2:.2f}  band={es.last_band_slope:.3f}",
+                icon="CHECKMARK" if ok else "INFO",
+            )
+            box.label(text=f"{es.last_router}   {es.last_secs:.1f}s")
+
+
 # ---------------------------------------------------------------------------
 # Reassembly
 # ---------------------------------------------------------------------------
@@ -258,6 +338,7 @@ class PP_PT_reassembly(_PRPanel, Panel):
         col = layout.column()
         col.use_property_split = True
         col.use_property_decorate = False
+        col.prop(s, "reassembly_resolution")
         col.prop(s, "extend_edge_colors")
         col.prop(s, "normalize_heightmaps", text="Normalize Heights")
 
@@ -275,6 +356,8 @@ _CLASSES = (
     PP_PT_erosion,
     PP_PT_erosion_lem,
     PP_PT_erosion_overlay,
+    PP_PT_erosion_coastal,
+    PP_PT_erosion_run,
     PP_PT_reassembly,
 )
 
