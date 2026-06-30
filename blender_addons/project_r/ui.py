@@ -6,21 +6,29 @@ from bpy.types import Panel
 from . import deps
 
 
-class PP_PT_main(Panel):
-    bl_label = "Project-R"
-    bl_idname = "PP_PT_main"
+_CATEGORY = "Project-R"
+
+
+class _PRPanel:
+    """Shared panel placement (N-panel > Project-R tab)."""
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "Project-R"
+    bl_category = _CATEGORY
+
+
+# ---------------------------------------------------------------------------
+# Root panel: dependency status + Project
+# ---------------------------------------------------------------------------
+class PP_PT_main(_PRPanel, Panel):
+    bl_label = "Project-R"
+    bl_idname = "PP_PT_main"
 
     def draw(self, context: bpy.types.Context) -> None:
         s = context.scene.projection_pasta
-        es = context.scene.projection_pasta_erosion
         layout = self.layout
 
+        # Dependencies (cached checks; no heavy imports in draw).
         installing = deps.PP_OT_install_dependencies.is_running()
-
-        # --- Dependencies (cached checks; no heavy imports in draw) ---
         missing = deps.missing_required()
         if missing or installing:
             box = layout.box()
@@ -31,140 +39,251 @@ class PP_PT_main(Panel):
                 box.label(text=f"Missing: {', '.join(missing)}", icon="ERROR")
             row = box.row()
             row.enabled = not installing
+            row.scale_y = 1.2
             row.operator("pp.install_dependencies", text="Install Dependencies", icon="IMPORT")
             box.label(text="Installs in the background; no restart needed.")
 
-        # --- Project ---
-        box = layout.box()
-        box.label(text="Project")
-        box.prop(s, "project_root")
-        box.prop(s, "planet_radius_km")
-        box.prop(s, "max_elevation_m")
+        col = layout.column()
+        col.use_property_split = True
+        col.use_property_decorate = False
+        col.prop(s, "project_root", text="Root")
+        col.prop(s, "planet_radius_km", text="Planet Radius")
+        col.prop(s, "max_elevation_m", text="Max Elevation")
 
         mp = s.manifest_path()
         has_project = bool(mp and mp.exists())
-        row = box.row(align=True)
+        row = layout.row(align=True)
         if has_project:
             row.operator("pp.open_project", text="Reload Project", icon="FILE_REFRESH")
         else:
             row.operator("pp.init_project", text="Create Project", icon="NEWFOLDER")
-        row.operator("pp.open_manifest", text="Open manifest.json")
+        row.operator("pp.open_manifest", text="manifest.json", icon="TEXT")
 
-        # --- Sphere ---
-        box = layout.box()
-        box.label(text="Sphere")
-        box.operator("pp.load_world_map", text="Load World Map", icon="WORLD")
+
+# ---------------------------------------------------------------------------
+# Sphere
+# ---------------------------------------------------------------------------
+class PP_PT_sphere(_PRPanel, Panel):
+    bl_label = "Sphere"
+    bl_idname = "PP_PT_sphere"
+    bl_parent_id = "PP_PT_main"
+    bl_order = 1
+
+    def draw(self, context: bpy.types.Context) -> None:
+        s = context.scene.projection_pasta
+        layout = self.layout
+
+        layout.operator("pp.load_world_map", text="Load World Map", icon="WORLD")
         hm_label = f"Heightmap: {s.heightmap_filename}" if s.heightmap_filename else "Select Heightmap (optional)"
-        box.operator("pp.select_heightmap", text=hm_label)
-        row = box.row(align=True)
-        row.operator("pp.expand_selection", text="Expand")
-        row.operator("pp.shrink_selection", text="Reduce")
-        box.prop(s, "overlay_opacity")
+        layout.operator("pp.select_heightmap", text=hm_label, icon="IMAGE_DATA")
 
-        # --- Section Export ---
-        box = layout.box()
-        box.label(text="Section Export")
-        box.prop(s, "new_section_name")
-        box.prop(s, "square_crop")
-        box.prop(s, "feather_px")
+        row = layout.row(align=True)
+        row.operator("pp.expand_selection", text="Expand", icon="ADD")
+        row.operator("pp.shrink_selection", text="Reduce", icon="REMOVE")
 
-        # Advanced options: disclosure state is now separate from the functional
-        # override toggle, so peeking at the fields no longer flips the override on.
-        adv_box = box.box()
-        adv_box.prop(
-            s, "show_advanced_section",
-            icon="TRIA_DOWN" if s.show_advanced_section else "TRIA_RIGHT",
-            text="Advanced Options",
-            emboss=False,
-        )
-        if s.show_advanced_section:
-            adv_box.prop(s, "override_projection_center")
-            col = adv_box.column(align=True)
-            col.enabled = s.override_projection_center
-            col.prop(s, "override_center_lon")
-            col.prop(s, "override_center_lat")
+        col = layout.column()
+        col.use_property_split = True
+        col.use_property_decorate = False
+        col.prop(s, "overlay_opacity")
 
-        box.prop(es, "erode_on_create")
-        box.operator("pp.create_section", text="Create Section from Selected Faces", icon="UV_FACESEL")
 
-        # --- Erosion ---
-        box = layout.box()
-        box.label(text="Erosion", icon="MOD_FLUIDSIM")
+# ---------------------------------------------------------------------------
+# Section Export (+ Advanced sub-panel)
+# ---------------------------------------------------------------------------
+class PP_PT_section(_PRPanel, Panel):
+    bl_label = "Section Export"
+    bl_idname = "PP_PT_section"
+    bl_parent_id = "PP_PT_main"
+    bl_order = 2
+
+    def draw(self, context: bpy.types.Context) -> None:
+        s = context.scene.projection_pasta
+        es = context.scene.projection_pasta_erosion
+        layout = self.layout
+
+        col = layout.column()
+        col.use_property_split = True
+        col.use_property_decorate = False
+        col.prop(s, "new_section_name", text="Name")
+        col.prop(s, "square_crop")
+        col.prop(s, "feather_px", text="Feather")
+        col.prop(es, "erode_on_create")
+
+        row = layout.row()
+        row.scale_y = 1.4
+        row.operator("pp.create_section", text="Create Section from Selected Faces", icon="UV_FACESEL")
+
+
+class PP_PT_section_advanced(_PRPanel, Panel):
+    bl_label = "Advanced"
+    bl_idname = "PP_PT_section_advanced"
+    bl_parent_id = "PP_PT_section"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw_header(self, context: bpy.types.Context) -> None:
+        # Disclosure header carries the override toggle; opening the panel to peek
+        # no longer flips the override (the bug the old single-bool expander had).
+        self.layout.prop(context.scene.projection_pasta, "override_projection_center", text="")
+
+    def draw(self, context: bpy.types.Context) -> None:
+        s = context.scene.projection_pasta
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        col = layout.column()
+        col.active = s.override_projection_center
+        col.prop(s, "override_center_lon", text="Center Longitude")
+        col.prop(s, "override_center_lat", text="Center Latitude")
+
+
+# ---------------------------------------------------------------------------
+# Erosion (+ Advanced LEM and Channel Overlay sub-panels)
+# ---------------------------------------------------------------------------
+class PP_PT_erosion(_PRPanel, Panel):
+    bl_label = "Erosion"
+    bl_idname = "PP_PT_erosion"
+    bl_parent_id = "PP_PT_main"
+    bl_order = 3
+
+    def draw_header(self, context: bpy.types.Context) -> None:
+        self.layout.label(text="", icon="MOD_FLUIDSIM")
+
+    def draw(self, context: bpy.types.Context) -> None:
+        es = context.scene.projection_pasta_erosion
+        layout = self.layout
 
         if not deps.landlab_available():
-            box.label(text="Install dependencies to enable erosion", icon="INFO")
+            layout.label(text="Install dependencies to enable erosion", icon="INFO")
+            return
+
+        if deps.priorityflood_available():
+            layout.label(text="Router: PriorityFlood (GPL, fast)", icon="CHECKMARK")
         else:
-            if deps.priorityflood_available():
-                box.label(text="Router: PriorityFlood (GPL, fast)", icon="CHECKMARK")
-            else:
-                box.label(text="Router: MIT fallback (slower)", icon="INFO")
+            layout.label(text="Router: MIT fallback (slower)", icon="INFO")
 
-            box.prop(es, "section")
+        col = layout.column()
+        col.use_property_split = True
+        col.use_property_decorate = False
+        col.prop(es, "section")
+        col.separator()
+        col.prop(es, "noise_kind", text="Seed Noise")
+        col.prop(es, "noise_amp", text="Noise Amount")
+        col.separator()
+        col.prop(es, "climate_kind", text="Climate")
+        col.prop(es, "climate_strength", text="Strength")
+        col.separator()
+        col.prop(es, "steps")
+        col.prop(es, "k_sp", text="Erodibility (K)")
+        col.prop(es, "max_work_px", text="Max Work Res")
+        col.prop(es, "target_peak_m", text="Target Peak")
 
-            col = box.column(align=True)
-            col.prop(es, "noise_kind")
-            col.prop(es, "noise_amp")
+        row = layout.row()
+        row.scale_y = 1.4
+        row.operator("pp.erode_section", text="Erode Section", icon="MOD_FLUIDSIM")
 
-            col = box.column(align=True)
-            col.prop(es, "climate_kind")
-            col.prop(es, "climate_strength")
-
-            # Steps + erodibility + work resolution: the three controls that set how
-            # long a run takes and how crisp it is, kept together at the top level.
-            col = box.column(align=True)
-            col.prop(es, "steps")
-            col.prop(es, "k_sp")
-            col.prop(es, "max_work_px")
-
-            adv = box.box()
-            adv.prop(
-                es, "show_lem_advanced",
-                icon="TRIA_DOWN" if es.show_lem_advanced else "TRIA_RIGHT",
-                text="Advanced LEM Settings",
-                emboss=False,
+        if es.last_report:
+            box = layout.box()
+            ok = (0.4 <= es.last_theta <= 0.55) and (es.last_r2 > 0.9)
+            box.label(
+                text=f"theta={es.last_theta:.2f}  R2={es.last_r2:.2f}  band={es.last_band_slope:.3f}",
+                icon="CHECKMARK" if ok else "INFO",
             )
-            if es.show_lem_advanced:
-                c = adv.column(align=True)
-                c.prop(es, "m_sp")
-                c.prop(es, "n_sp")
-                c.prop(es, "diffusivity")
-                c.prop(es, "uplift")
-                c.prop(es, "dt")
-                c.prop(es, "noise_seed")
+            box.label(text=f"{es.last_router}   {es.last_secs:.1f}s")
 
-            ov = box.box()
-            ov.prop(es, "enable_overlay")
-            if es.enable_overlay:
-                c = ov.column(align=True)
-                c.prop(es, "overlay_depth_m")
-                c.prop(es, "overlay_w_macro_km")
-                c.prop(es, "overlay_r")
 
-            box.prop(es, "target_peak_m")
-            box.operator("pp.erode_section", text="Erode Section", icon="MOD_FLUIDSIM")
+class PP_PT_erosion_lem(_PRPanel, Panel):
+    bl_label = "Advanced LEM"
+    bl_idname = "PP_PT_erosion_lem"
+    bl_parent_id = "PP_PT_erosion"
+    bl_options = {"DEFAULT_CLOSED"}
 
-            if es.last_report:
-                rb = box.box()
-                ok = (0.4 <= es.last_theta <= 0.55) and (es.last_r2 > 0.9)
-                rb.label(
-                    text=f"theta={es.last_theta:.2f} R2={es.last_r2:.2f} band={es.last_band_slope:.3f}",
-                    icon="CHECKMARK" if ok else "INFO",
-                )
-                rb.label(text=f"{es.last_router}  {es.last_secs:.1f}s")
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return deps.landlab_available()
 
-        # --- Reassembly ---
-        box = layout.box()
-        box.label(text="Reassembly")
-        box.prop(s, "extend_edge_colors")
-        box.prop(s, "normalize_heightmaps")
-        row = box.row(align=True)
-        row.operator("pp.validate_processed", text="Validate")
-        row.operator("pp.reassemble", text="Reassemble")
+    def draw(self, context: bpy.types.Context) -> None:
+        es = context.scene.projection_pasta_erosion
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        col = layout.column()
+        col.prop(es, "m_sp")
+        col.prop(es, "n_sp")
+        col.prop(es, "diffusivity")
+        col.prop(es, "uplift")
+        col.prop(es, "dt")
+        col.prop(es, "noise_seed")
+
+
+class PP_PT_erosion_overlay(_PRPanel, Panel):
+    bl_label = "Channel Overlay"
+    bl_idname = "PP_PT_erosion_overlay"
+    bl_parent_id = "PP_PT_erosion"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return deps.landlab_available()
+
+    def draw_header(self, context: bpy.types.Context) -> None:
+        self.layout.prop(context.scene.projection_pasta_erosion, "enable_overlay", text="")
+
+    def draw(self, context: bpy.types.Context) -> None:
+        es = context.scene.projection_pasta_erosion
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        col = layout.column()
+        col.active = es.enable_overlay
+        col.prop(es, "overlay_depth_m", text="Depth")
+        col.prop(es, "overlay_w_macro_km", text="Widest Valley")
+        col.prop(es, "overlay_r", text="Blur Ratio")
+
+
+# ---------------------------------------------------------------------------
+# Reassembly
+# ---------------------------------------------------------------------------
+class PP_PT_reassembly(_PRPanel, Panel):
+    bl_label = "Reassembly"
+    bl_idname = "PP_PT_reassembly"
+    bl_parent_id = "PP_PT_main"
+    bl_order = 4
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context: bpy.types.Context) -> None:
+        s = context.scene.projection_pasta
+        layout = self.layout
+
+        col = layout.column()
+        col.use_property_split = True
+        col.use_property_decorate = False
+        col.prop(s, "extend_edge_colors")
+        col.prop(s, "normalize_heightmaps", text="Normalize Heights")
+
+        layout.operator("pp.validate_processed", text="Validate", icon="CHECKMARK")
+        row = layout.row()
+        row.scale_y = 1.4
+        row.operator("pp.reassemble", text="Reassemble", icon="MOD_BUILD")
+
+
+_CLASSES = (
+    PP_PT_main,
+    PP_PT_sphere,
+    PP_PT_section,
+    PP_PT_section_advanced,
+    PP_PT_erosion,
+    PP_PT_erosion_lem,
+    PP_PT_erosion_overlay,
+    PP_PT_reassembly,
+)
 
 
 def register() -> None:
-    bpy.utils.register_class(PP_PT_main)
+    for c in _CLASSES:
+        bpy.utils.register_class(c)
 
 
 def unregister() -> None:
-    bpy.utils.unregister_class(PP_PT_main)
+    for c in reversed(_CLASSES):
+        bpy.utils.unregister_class(c)

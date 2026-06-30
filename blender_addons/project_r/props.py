@@ -227,16 +227,8 @@ class ProjectionPastaProjectSettings(PropertyGroup):
         default="NewSection",
     )
 
-    # UI-only disclosure state for the Section Export advanced panel. Kept separate
-    # from override_projection_center so opening the panel to peek doesn't flip the
-    # functional override on/off.
-    show_advanced_section: BoolProperty(  # type: ignore[valid-type]
-        name="Advanced Options",
-        description="Show advanced section-export options",
-        default=False,
-    )
-
-    # Advanced: Projection center override
+    # Advanced: Projection center override (its disclosure is the Section > Advanced
+    # sub-panel, whose header checkbox drives this flag).
     override_projection_center: BoolProperty(  # type: ignore[valid-type]
         name="Override Center",
         description="Manually specify the Hammer projection center instead of auto-computing from selection",
@@ -498,12 +490,6 @@ class ProjectionPastaErosionSettings(PropertyGroup):
         default=0.0,
         min=0.0,
         soft_max=20000.0,
-    )
-
-    # --- UI state ---
-    show_lem_advanced: BoolProperty(  # type: ignore[valid-type]
-        name="Advanced LEM Settings",
-        default=False,
     )
 
     # --- Last-run quality readout (filled by the operator; transient internal
