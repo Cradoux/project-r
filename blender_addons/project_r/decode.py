@@ -56,6 +56,14 @@ def koppen_guess(rgb: Tuple[int, int, int]) -> Tuple[str, float]:
 # Colormap ramp -> scalar
 # ---------------------------------------------------------------------------
 
+def decode_luminance(rgb01: np.ndarray) -> np.ndarray:
+    """Perceptual luminance [0,1] of an (H,W,3+) image. A dependency-free, monotonic
+    decode for dark->bright intensity ramps whose exact colormap is unknown (e.g. Gleba's
+    OrogenyStrength / soil maps), where brightness tracks the quantity. Returns (H,W)."""
+    rgb = np.asarray(rgb01, dtype=np.float32)[..., :3]
+    return np.clip(0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2], 0.0, 1.0)
+
+
 def decode_colormap_to_scalar(
     rgb01: np.ndarray,
     *,

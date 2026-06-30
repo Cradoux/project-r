@@ -395,6 +395,18 @@ def _new_grid(seed_m: np.ndarray, cell_m: float,
 # LEM: stream-power + diffusion landscape evolution (carves crisp drainage)
 # ---------------------------------------------------------------------------
 
+def _stretch01(a: np.ndarray, land: Optional[np.ndarray] = None) -> np.ndarray:
+    """Robustly rescale an array to [0,1] using p2..p98 of its LAND values (so a
+    spatial-driver crop spans the full knob range regardless of absolute brightness)."""
+    a = np.asarray(a, dtype=np.float64)
+    vals = a[land] if (land is not None and np.any(land)) else a.ravel()
+    lo = float(np.percentile(vals, 2))
+    hi = float(np.percentile(vals, 98))
+    if hi - lo < 1e-9:
+        return np.full_like(a, 0.5)
+    return np.clip((a - lo) / (hi - lo), 0.0, 1.0)
+
+
 def lem_erode(
     height_m: np.ndarray,
     cell_m: float,
@@ -410,6 +422,8 @@ def lem_erode(
     flow_metric: str = "D8",
     sea_mask: Optional[np.ndarray] = None,
     sea_level: float = 0.0,
+    k_field: Optional[np.ndarray] = None,
+    uplift_field: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, Dict]:
     """Evolve ``height_m`` under stream-power incision + linear hillslope diffusion.
 
@@ -418,6 +432,11 @@ def lem_erode(
     rainfall field the discharge ``Q = R*A`` drives ``E = K Q^m S^n`` (climate-driven incision).
     ``sea_mask`` (cells at/below ``sea_level``) pins the ocean as a fixed base-level outlet so the
     land erodes toward the coast without the sea uplifting or the coastline being reworked.
+
+    ``k_field`` (spatial erodibility) and ``uplift_field`` (spatial uplift) are optional per-cell
+    arrays (same 2-D shape as ``height_m``); when given they REPLACE the scalar ``k_sp`` / ``uplift``
+    so softer rock erodes faster and orogenic belts uplift more. ``None`` => the scalar (unchanged
+    behaviour).
     """
     from landlab.components import FastscapeEroder, LinearDiffuser
 
@@ -429,20 +448,42 @@ def lem_erode(
 
     g, z = _new_grid(seed, cell_m, sea_mask=sea_mask, sea_level=sea_level)
     router, router_name = _make_router(g, runoff, flow_metric=flow_metric)
-    sp = FastscapeEroder(g, K_sp=k_sp, m_sp=m_sp, n_sp=n_sp,
+
+    # Spatial erodibility: FastscapeEroder accepts a per-node K array. Register it as a
+    # grid field (the portable form across landlab versions) and pass by name.
+    if k_field is not None:
+        k_arr = np.asarray(k_field, dtype=np.float64).ravel()
+        if k_arr.size != z.size:
+            raise ValueError(f"k_field size {k_arr.size} != node count {z.size}")
+        if "K_sp_field" in g.at_node:
+            g.at_node["K_sp_field"][:] = k_arr
+        else:
+            g.add_field("K_sp_field", k_arr, at="node")
+        k_arg = g.at_node["K_sp_field"]
+    else:
+        k_arg = k_sp
+    sp = FastscapeEroder(g, K_sp=k_arg, m_sp=m_sp, n_sp=n_sp,
                          discharge_field="surface_water__discharge")
     ld = LinearDiffuser(g, linear_diffusivity=diffusivity)
     core = g.core_nodes
 
+    # Spatial uplift: per-node uplift rate applied to core nodes each step.
+    u_arr = None
+    if uplift_field is not None:
+        u_arr = np.asarray(uplift_field, dtype=np.float64).ravel()
+        if u_arr.size != z.size:
+            raise ValueError(f"uplift_field size {u_arr.size} != node count {z.size}")
+
     t0 = time.perf_counter()
     for _ in range(int(steps)):
-        z[core] += uplift * dt
+        z[core] += (u_arr[core] if u_arr is not None else uplift) * dt
         router.run_one_step()
         sp.run_one_step(dt)
         ld.run_one_step(dt)
     secs = time.perf_counter() - t0
 
-    info = {"router": router_name, "secs": round(secs, 2), "steps": int(steps)}
+    info = {"router": router_name, "secs": round(secs, 2), "steps": int(steps),
+            "spatial_k": k_field is not None, "spatial_uplift": uplift_field is not None}
     out = z.reshape(seed.shape).astype(np.float32)
     dr = g.at_node["drainage_area"].reshape(seed.shape).astype(np.float32)
     return out, dr, info
@@ -1209,6 +1250,10 @@ def run_erosion(
     climate_kind: str = "uniform",
     climate_strength: float = 1.0,
     rainfall: Optional[np.ndarray] = None,
+    erodibility_norm: Optional[np.ndarray] = None,
+    erodibility_contrast: float = 1.0,
+    uplift_norm: Optional[np.ndarray] = None,
+    uplift_influence: float = 0.0,
     k_sp: float = 3e-5,
     m_sp: float = 0.5,
     n_sp: float = 1.0,
@@ -1323,10 +1368,28 @@ def run_erosion(
     else:
         rain_field = None
 
+    # --- Optional spatial drivers (normalized [0,1] crops) -> per-cell K / U fields ---
+    # Both are stretched to [0,1] over LAND (robust p2..p98) so the knob ranges behave
+    # regardless of the map's absolute brightness; ocean cells don't evolve so their
+    # values are irrelevant.
+    land_for_norm = ~sea_mask
+    k_field = None
+    if erodibility_norm is not None and float(erodibility_contrast) > 1.0001:
+        en = _stretch01(np.asarray(erodibility_norm, dtype=np.float64).reshape(height_m.shape), land_for_norm)
+        c = float(erodibility_contrast)
+        # norm 0.5 -> Kx1 (neutral); 1 -> Kxc (softest, erodes faster); 0 -> K/c (hardest).
+        k_field = (float(k_sp) * np.power(c, 2.0 * en - 1.0)).astype(np.float64)
+    uplift_field = None
+    if uplift_norm is not None and float(uplift_influence) > 1e-6:
+        un = _stretch01(np.asarray(uplift_norm, dtype=np.float64).reshape(height_m.shape), land_for_norm)
+        infl = float(np.clip(uplift_influence, 0.0, 1.0))
+        uplift_field = (float(uplift) * ((1.0 - infl) + infl * un)).astype(np.float64)
+
     z, dr, lem_info = lem_erode(
         seed, cell_m, rainfall=rain_field, k_sp=k_sp, m_sp=m_sp, n_sp=n_sp,
         diffusivity=diffusivity, uplift=uplift, dt=dt, steps=steps, flow_metric=flow_metric,
         sea_mask=sea_mask if has_sea else None, sea_level=float(sea_level_m),
+        k_field=k_field, uplift_field=uplift_field,
     )
 
     overlay_secs = None

@@ -133,11 +133,11 @@ Exact-match works where flat-filled (Biome, GeologicProvince 5-class, Volcanism 
 
 These four require **no new pipeline** — only file selection plus a rainfall decode-on-load step.
 
-### Tier 2 — high-value NEW spatial drivers
-Data flow for both (mirrors heightmap): **global equirect PNG → decode-on-load to single-channel float cached in `source/` → cropped+Hammer-reprojected per section (same pass as heightmap, `interp_for_layer`) → normalized [0,1] field → modulates the LEM term per node.**
+### Tier 2 — high-value NEW spatial drivers — IMPLEMENTED in PR4
+Data flow (mirrors rainfall): **map → decode-on-load to single-channel float cached in `source/` → cropped per section → resampled to work res → normalized [0,1] over land → modulates the LEM per node.** `lem_erode`/`run_erosion` now accept per-cell `k_field`/`uplift_field`.
 
-5. **Uplift U = `OrogenyStrength`.** Decode viridis→[0,1], clamp sentinel→0, mask ocean. In `erosion.py` set `U_eff(x,y) = U_base × orogeny(x,y)`. **Decode:** LUT inversion + sentinel handling. **Alignment:** native 4096×2048, crops with heightmap. **Risk:** cmap ID medium-confidence (105 levels); validate, fallback inferno/magma. New `uplift_filename` prop + UI control + erosion term.
-6. **Erodibility K_sp = `RockType`** (or `GeologicProvince` for simplicity). Nearest-palette → class id → user-editable class→K_sp table → `K_sp(x,y) = K_base × factor[class]`. **Resample nearest-neighbor only.** Small Gaussian blur on the float K_sp field before the solver to avoid hard-edge numerical artifacts. **Risk:** no embedded legend → heuristic K_sp until Gleba class table obtained. New `erodibility_filename` prop + class-LUT UI.
+5. **Uplift U = `OrogenyStrength`.** ⚠️ Verified **NOT viridis** (no clean cmap fit) — it's a dark→bright intensity ramp, so decoded by **perceptual luminance** (dependency-free, monotonic: bright yellow belts = high). `U_eff = U_base × ((1−infl) + infl·norm)` via the **Uplift Influence** knob (0 = uniform, 1 = full). Slot auto-fills on Detect (influence 0.5). Verified under landlab: high-orogeny belts grow taller.
+6. **Erodibility K_sp** — `K_eff = K_base × contrast^(2·norm−1)` (norm 0.5 = neutral) via the **Erodibility Contrast** knob, decoded by luminance — works for any **continuous** softness map (e.g. `SoilDepth`). Verified under landlab: soft rock erodes flatter. **Categorical `RockType`/`GeologicProvince` (per-class K) is deferred** — its luminance ordering is arbitrary and a calibrated class→K table needs Gleba's legend (PR5). Detect suggests it rather than auto-filling.
 
 ### Tier 3 — nice-to-have / informational
 7. **Explicit land/sea mask slot** (`ClimateLandVsSea`, or derive from `...Land` heightmap) → replaces brightness-threshold sea-level guesswork; feeds coastal/sea-floor passes. Low cost, high cleanliness.

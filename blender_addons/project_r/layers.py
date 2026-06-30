@@ -151,6 +151,11 @@ def treat_as_color(name: str) -> bool:
     """Whether a layer is an sRGB colour image (vs linear data like a heightmap, a
     rainfall/bathymetry map, or a categorical mask). Drives 8-bit-sRGB vs 16-bit-linear
     encode -- so single-channel data crops stay 16-bit, not collapsed to 8-bit colour."""
+    n = name.lower()
+    # Our decoded single-channel caches (rainfall/uplift/erodibility/bathymetry) are 16-bit
+    # data, never sRGB colour -- recognise them by the cache marker regardless of stem.
+    if "__decoded" in n or "__bathy" in n:
+        return False
     if is_mask_name(name) or is_height_name(name) or is_rainfall_name(name) or is_bathy_name(name):
         return False
     return Path(name).suffix.lower() in _COLOR_EXTS

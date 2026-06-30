@@ -468,6 +468,39 @@ class ProjectionPastaErosionSettings(PropertyGroup):
         default="",
     )
 
+    # --- Optional spatial drivers (per-cell fields cropped per section) ---
+    uplift_filename: StringProperty(  # type: ignore[valid-type]
+        name="Uplift Map",
+        description="Filename in source/ of an orogeny/uplift-intensity map (brighter = more uplift). "
+                    "Decoded by luminance; concentrates relief in active belts. Empty = uniform uplift",
+        default="",
+    )
+    uplift_influence: FloatProperty(  # type: ignore[valid-type]
+        name="Uplift Influence",
+        description="How strongly the Uplift Map modulates uplift. 0 = uniform (ignore the map); "
+                    "1 = uplift scales fully with map brightness (no uplift where the map is dark)",
+        default=0.0,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+    erodibility_filename: StringProperty(  # type: ignore[valid-type]
+        name="Erodibility Map",
+        description="Filename in source/ of a CONTINUOUS rock-softness map (brighter = softer = erodes "
+                    "faster). Decoded by luminance. Categorical rock-type maps need a class legend and "
+                    "are not supported here yet. Empty = uniform erodibility",
+        default="",
+    )
+    erodibility_contrast: FloatProperty(  # type: ignore[valid-type]
+        name="Erodibility Contrast",
+        description="Spread of erodibility (K) around the base value. 1 = uniform (ignore the map); "
+                    "higher = softer rock erodes much faster than hard rock (K x contrast at brightest, "
+                    "K / contrast at darkest)",
+        default=1.0,
+        min=1.0,
+        soft_max=8.0,
+    )
+
     # --- Stream-power LEM parameters ---
     k_sp: FloatProperty(  # type: ignore[valid-type]
         name="Erodibility (K)",

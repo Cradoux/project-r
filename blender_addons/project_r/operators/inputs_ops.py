@@ -72,6 +72,12 @@ def _ingest_map(root: Path, src_path: Path, *, transform: str = "none") -> str:
         if buf.channels >= 3 and not _is_effectively_gray(buf.pixels):
             scalar = decode.decode_colormap_to_scalar(buf.pixels)
             return _save_single_channel(source, f"{src_path.stem}__decoded.png", scalar)
+    elif transform == "luminance":
+        buf = imaging.load_image(src_path)
+        if buf.channels >= 3:
+            lum = decode.decode_luminance(buf.pixels)
+            return _save_single_channel(source, f"{src_path.stem}__decoded.png", lum)
+        # already single-channel: fall through to a plain copy (usable field as-is)
     elif transform == "invert_depth":
         buf = imaging.load_image(src_path)
         px = buf.pixels[:, :, 0] if buf.pixels.ndim == 3 else buf.pixels
@@ -96,7 +102,8 @@ def _save_single_channel(source: Path, name: str, arr: np.ndarray) -> str:
 
 
 # Per-slot ingest transform.
-_SLOT_TRANSFORM = {"heightmap": "none", "rainfall": "colormap", "bathymetry": "invert_depth"}
+_SLOT_TRANSFORM = {"heightmap": "none", "rainfall": "colormap", "bathymetry": "invert_depth",
+                   "uplift": "luminance", "erodibility": "luminance"}
 
 
 # Slot -> (where the filename lives). Only the roles Project-R consumes today are
@@ -114,6 +121,15 @@ def _set_slot_filename(context, slot: str, filename: str) -> None:
         # load is the obvious intent (clearing the slot leaves the pass as the user set it).
         if filename:
             es.enable_seafloor = True
+    elif slot == "uplift":
+        es.uplift_filename = filename
+        # Loading a map with influence still at 0 would be a no-op; nudge it on so it acts.
+        if filename and es.uplift_influence <= 1e-6:
+            es.uplift_influence = 0.5
+    elif slot == "erodibility":
+        es.erodibility_filename = filename
+        if filename and es.erodibility_contrast <= 1.0001:
+            es.erodibility_contrast = 2.0
 
 
 class PP_OT_set_input_map(Operator):
@@ -128,6 +144,8 @@ class PP_OT_set_input_map(Operator):
             ("heightmap", "Heightmap", "Single-channel elevation (brighter = higher)"),
             ("rainfall", "Rainfall", "Runoff weight (colormap maps are decoded to a scalar)"),
             ("bathymetry", "Bathymetry", "Ocean depth for the Sea Floor pass (Gleba depth maps are inverted)"),
+            ("uplift", "Uplift", "Orogeny/uplift intensity (luminance-decoded); concentrates relief in belts"),
+            ("erodibility", "Erodibility", "Continuous rock-softness (luminance-decoded); softer erodes faster"),
         ],
         default="heightmap",
         options={"SKIP_SAVE"},
@@ -227,10 +245,21 @@ class PP_OT_detect_source_maps(Operator):
             except Exception as e:
                 notes.append(f"bathymetry decode failed: {e}")
 
-        # The rest are not consumed yet -- surface them as suggestions.
-        for slot in ("world_map", "landsea_mask", "uplift", "erodibility"):
+        # Uplift (consumed): luminance-decode the orogeny map on ingest, nudge influence on.
+        if not (es.uplift_filename or "").strip() and picks["uplift"]:
+            try:
+                name = _ingest_map(root, src / picks["uplift"], transform="luminance")
+                _set_slot_filename(context, "uplift", name)
+                filled.append(f"uplift={name} (influence {es.uplift_influence:.1f})")
+            except Exception as e:
+                notes.append(f"uplift decode failed: {e}")
+
+        # Erodibility's best auto-pick is a categorical rock map, whose luminance ordering is
+        # arbitrary -- so suggest it (set manually with a continuous map) rather than auto-fill.
+        for slot in ("world_map", "landsea_mask", "erodibility"):
             if picks.get(slot):
-                notes.append(f"{slot}: {picks[slot]}")
+                hint = " (categorical; set manually with a continuous map)" if slot == "erodibility" else ""
+                notes.append(f"{slot}: {picks[slot]}{hint}")
 
         msg = "Auto-filled " + (", ".join(filled) if filled else "nothing new")
         if notes:

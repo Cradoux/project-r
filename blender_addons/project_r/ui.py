@@ -118,6 +118,31 @@ class PP_PT_inputs(_PRPanel, Panel):
             cl = r.operator("pp.set_input_map", text="", icon="X")
             cl.slot = "bathymetry"; cl.clear = True
 
+        # Spatial erosion drivers (uplift / erodibility) -> modulate the LEM.
+        layout.separator()
+        drv = layout.column(align=True)
+        drv.label(text="Spatial Drivers (erosion)", icon="FORCE_FORCE")
+
+        um = f"Uplift: {es.uplift_filename}" if es.uplift_filename else "Uplift Map (optional)"
+        r = drv.row(align=True)
+        op = r.operator("pp.set_input_map", text=um, icon="IMAGE_DATA")
+        op.slot = "uplift"; op.clear = False
+        if es.uplift_filename:
+            cl = r.operator("pp.set_input_map", text="", icon="X")
+            cl.slot = "uplift"; cl.clear = True
+        if es.uplift_filename:
+            drv.prop(es, "uplift_influence", text="Influence")
+
+        em = f"Erodibility: {es.erodibility_filename}" if es.erodibility_filename else "Erodibility Map (optional)"
+        r = drv.row(align=True)
+        op = r.operator("pp.set_input_map", text=em, icon="IMAGE_DATA")
+        op.slot = "erodibility"; op.clear = False
+        if es.erodibility_filename:
+            cl = r.operator("pp.set_input_map", text="", icon="X")
+            cl.slot = "erodibility"; cl.clear = True
+        if es.erodibility_filename:
+            drv.prop(es, "erodibility_contrast", text="Contrast")
+
         # Categorical -> per-class B&W masks (Gaea downstream).
         layout.separator()
         box = layout.box()

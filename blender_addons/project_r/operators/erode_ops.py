@@ -76,6 +76,36 @@ def _find_rainfall_filename(sec: dict, explicit: str, heightmap_name: Optional[s
     return None
 
 
+def _find_layer_crop(sec: dict, explicit: str) -> Optional[str]:
+    """The crop filename matching an explicit layer name (exact, then by stem), or None.
+    Used for the optional spatial-driver crops (uplift / erodibility)."""
+    explicit = (explicit or "").strip()
+    if not explicit:
+        return None
+    crop_paths = (sec.get("crop", {}) or {}).get("paths_by_layer", {}) or {}
+    names = list(crop_paths.keys())
+    if explicit in names:
+        return explicit
+    stem = Path(explicit).stem.lower()
+    for n in names:
+        if Path(n).stem.lower() == stem:
+            return n
+    return None
+
+
+def _load_crop_field(crop_path: Path, work_w: int, work_h: int) -> Optional[np.ndarray]:
+    """Load a single-channel crop and resample to (work_h, work_w) as float32. None on failure."""
+    try:
+        img = imaging.load_image(crop_path)
+        px = img.pixels
+        if px.ndim == 3:
+            px = px[:, :, 0]
+        return layers.resample_2d(px.astype(np.float32), work_w, work_h)
+    except Exception as ex:
+        print(f"[Project-R] Warning: failed to load spatial-driver crop '{crop_path.name}': {ex}")
+        return None
+
+
 class PP_OT_erode_section(bpy.types.Operator):
     bl_idname = "pp.erode_section"
     bl_label = "Erode Section"
@@ -262,6 +292,26 @@ class PP_OT_erode_section(bpy.types.Operator):
                 print(f"[Project-R] Warning: failed to load rainfall map '{rain_name}': {ex}")
                 rainfall_work = None
 
+        # --- Optional spatial uplift / erodibility crops -> normalized fields at work res ---
+        # Like rainfall: a layer dropped into source/ is cropped per section, and we look it up
+        # by the filename stored on the slot. Missing/empty falls back to uniform.
+        uplift_work = None
+        if (es.uplift_filename or "").strip():
+            up_name = _find_layer_crop(sec, es.uplift_filename)
+            if up_name:
+                uplift_work = _load_crop_field(root / "sections" / sec_id / "crops" / up_name, work_w, work_h)
+            else:
+                self.report({"WARNING"}, f"Uplift map '{es.uplift_filename}' not found in this "
+                                         f"section's crops; using uniform uplift.")
+        erod_work = None
+        if (es.erodibility_filename or "").strip():
+            er_name = _find_layer_crop(sec, es.erodibility_filename)
+            if er_name:
+                erod_work = _load_crop_field(root / "sections" / sec_id / "crops" / er_name, work_w, work_h)
+            else:
+                self.report({"WARNING"}, f"Erodibility map '{es.erodibility_filename}' not found in this "
+                                         f"section's crops; using uniform erodibility.")
+
         # --- Optional direct bathymetry map (for the sea-floor pass) -> [0..1] depth at work res ---
         bathy_work = None
         bathy_name = (es.seafloor_bathy_filename or "").strip()
@@ -306,7 +356,9 @@ class PP_OT_erode_section(bpy.types.Operator):
         print(f"[Project-R] Eroding '{sec_id}/{hm_name}': native {W0}x{H0}, work {work_w}x{work_h}, "
               f"cell {cell_work_m:.0f} m/px, tile {tile_km:.0f} km, peak {target_peak_m:.0f} m, "
               f"preset {scale_label}, steps {lem_kw['steps']}, strength {strength:.2f}, sea {sea_level_m:.0f} m, "
-              f"rain {rain_name or 'uniform'}")
+              f"rain {rain_name or 'uniform'}, "
+              f"uplift-map {(es.uplift_filename if uplift_work is not None else 'uniform')}, "
+              f"erod-map {(es.erodibility_filename if erod_work is not None else 'uniform')}")
 
         # Erosion is a blocking compute (seconds to many minutes). Until it becomes a
         # background job, at least show an honest busy state: a WAIT cursor and a
@@ -327,6 +379,10 @@ class PP_OT_erode_section(bpy.types.Operator):
                     noise_amp=float(es.noise_amp),
                     noise_seed=int(es.noise_seed),
                     rainfall=rainfall_work,
+                    erodibility_norm=erod_work,
+                    erodibility_contrast=float(es.erodibility_contrast),
+                    uplift_norm=uplift_work,
+                    uplift_influence=float(es.uplift_influence),
                     enable_overlay=bool(es.enable_overlay),
                     overlay_depth_m=float(es.overlay_depth_m),
                     overlay_w_macro_km=float(es.overlay_w_macro_km),
@@ -491,6 +547,10 @@ class PP_OT_erode_section(bpy.types.Operator):
                     "strength": strength, "sea_level_m": sea_level_m,
                     "noise_kind": str(es.noise_kind), "noise_amp": float(es.noise_amp),
                     "rainfall_map": rain_name or "",
+                    "uplift_map": (es.uplift_filename if uplift_work is not None else ""),
+                    "uplift_influence": float(es.uplift_influence),
+                    "erodibility_map": (es.erodibility_filename if erod_work is not None else ""),
+                    "erodibility_contrast": float(es.erodibility_contrast),
                     "k_sp": float(lem_kw["k_sp"]), "m_sp": float(lem_kw["m_sp"]), "n_sp": float(lem_kw["n_sp"]),
                     "diffusivity": float(lem_kw["diffusivity"]), "uplift": float(lem_kw["uplift"]),
                     "dt": float(lem_kw["dt"]), "steps": int(lem_kw["steps"]),
