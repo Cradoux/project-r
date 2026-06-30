@@ -7,47 +7,27 @@ from typing import List, Optional, Tuple
 import bpy
 import numpy as np
 
-from .. import ensure_user_site_on_path
+from .. import deps
 from .. import erosion
 from .. import imaging
+from .. import layers
 from .. import manifest as manifest_lib
 
 
-# Crop/layer name keywords that identify a heightmap when no explicit one is set.
-_HEIGHT_KEYWORDS = ("height", "elev", "dem")
+# Sentinel for "erode whatever section was created last" (props.MOST_RECENT_ID).
+_MOST_RECENT = "__MOST_RECENT__"
 
 
-def _is_height_name(name: str) -> bool:
-    n = name.lower()
-    return any(k in n for k in _HEIGHT_KEYWORDS)
-
-
-def _resample_2d(arr: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
-    """Bilinear resample a 2D float array to (out_h, out_w). Uses Pillow 'F' mode; falls back to
-    nearest-ish index sampling if Pillow is unavailable."""
-    h, w = arr.shape[:2]
-    if (w, h) == (out_w, out_h):
-        return arr.astype(np.float32, copy=False)
-    try:
-        from PIL import Image as PILImage  # type: ignore
-        im = PILImage.fromarray(arr.astype(np.float32), mode="F")
-        im = im.resize((int(out_w), int(out_h)), resample=PILImage.BILINEAR)
-        return np.asarray(im, dtype=np.float32)
-    except Exception:
-        ys = np.clip((np.arange(out_h) * h / out_h).astype(int), 0, h - 1)
-        xs = np.clip((np.arange(out_w) * w / out_w).astype(int), 0, w - 1)
-        return arr[ys][:, xs].astype(np.float32)
-
-
-def _resolve_section(manifest: dict, section_id: str) -> Optional[dict]:
+def _resolve_section(manifest: dict, section_value: str) -> Optional[dict]:
     sections = manifest.get("sections", []) or []
     if not sections:
         return None
-    key = (section_id or "").strip().lower()
-    if not key:
+    key = (section_value or "").strip()
+    if not key or key == _MOST_RECENT:
         return sections[-1]  # most recently created
+    low = key.lower()
     for sec in sections:
-        if str(sec.get("id", "")).lower() == key or str(sec.get("name", "")).lower() == key:
+        if str(sec.get("id", "")).lower() == low or str(sec.get("name", "")).lower() == low:
             return sec
     return None
 
@@ -67,37 +47,51 @@ def _find_heightmap_filename(sec: dict, explicit: str) -> Optional[str]:
             if Path(n).stem.lower() == stem:
                 return n
     for n in names:
-        if _is_height_name(n):
+        if layers.is_height_name(n):
             return n
     return None
 
 
-class PR_OT_erode_section(bpy.types.Operator):
-    bl_idname = "pr.erode_section"
+class PP_OT_erode_section(bpy.types.Operator):
+    bl_idname = "pp.erode_section"
     bl_label = "Erode Section"
     bl_description = ("Carve dendritic river drainage into a section's heightmap crop "
                       "(stream-power erosion in the equal-area oblique projection), and write the "
                       "result to processed/ so Reassemble blends it back into the global map")
 
+    # When set (e.g. by Create Section's "erode after creating"), erode this exact
+    # section id instead of the dropdown selection -- no reliance on a fallback.
+    section_override: bpy.props.StringProperty(default="", options={"SKIP_SAVE", "HIDDEN"})  # type: ignore[valid-type]
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        s = getattr(context.scene, "projection_pasta", None)
+        mp = s.manifest_path() if s is not None else None
+        if mp is None or not mp.exists():
+            cls.poll_message_set("Open or create a project first")
+            return False
+        return True
+
     def execute(self, context: bpy.types.Context):
         s = context.scene.projection_pasta
         es = context.scene.projection_pasta_erosion
 
-        ensure_user_site_on_path()  # so --user installs are visible even via scripted invocation
-        if not erosion.is_landlab_available():
-            self.report({"ERROR"}, "landlab is not installed. Click 'Install Dependencies' and restart Blender.")
+        deps.ensure_on_path()  # make a just-installed landlab importable without restart
+        if not deps.landlab_available():
+            self.report({"ERROR"}, "landlab is not installed. Click 'Install Dependencies' (no restart needed).")
             return {"CANCELLED"}
 
         root = s.project_root_path()
         mp = s.manifest_path()
         if root is None or mp is None or not mp.exists():
-            self.report({"ERROR"}, "manifest.json not found (set Project Root and Init Project)")
+            self.report({"ERROR"}, "manifest.json not found (Open or Create a project first)")
             return {"CANCELLED"}
 
         manifest = manifest_lib.read_manifest(mp)
-        sec = _resolve_section(manifest, es.section_id)
+        target_value = (self.section_override or es.section or "").strip()
+        sec = _resolve_section(manifest, target_value)
         if sec is None:
-            self.report({"ERROR"}, "No matching section found (check the Section field, or create a section first)")
+            self.report({"ERROR"}, "No matching section found (pick one from the Section dropdown, or create a section first)")
             return {"CANCELLED"}
         sec_id = str(sec.get("id", ""))
 
@@ -151,7 +145,7 @@ class PR_OT_erode_section(bpy.types.Operator):
             scale = max_work / float(max(H0, W0))
             work_w = max(8, int(round(W0 * scale)))
             work_h = max(8, int(round(H0 * scale)))
-            work_seed = _resample_2d(height_m, work_w, work_h)
+            work_seed = layers.resample_2d(height_m, work_w, work_h)
         else:
             work_w, work_h = W0, H0
             work_seed = height_m
@@ -173,53 +167,64 @@ class PR_OT_erode_section(bpy.types.Operator):
         print(f"[Project-R] Eroding '{sec_id}/{hm_name}': native {W0}x{H0}, work {work_w}x{work_h}, "
               f"cell {cell_work_m:.0f} m/px, tile {tile_km:.0f} km, peak target {target_peak_m:.0f} m")
 
-        # --- Run erosion (metrics computed pre-rescale, inside run_erosion) ---
+        # Erosion is a blocking compute (seconds to many minutes). Until it becomes a
+        # background job, at least show an honest busy state: a WAIT cursor and a
+        # status-bar progress range, so the user can tell a long run from a hang.
+        win = context.window
+        wm = context.window_manager
+        win.cursor_set("WAIT")
+        wm.progress_begin(0, int(es.steps))
         try:
-            z_work, metrics = erosion.run_erosion(
-                work_seed,
-                cell_work_m,
-                tile_km,
-                work_w,
-                noise_kind=str(es.noise_kind),
-                noise_amp=float(es.noise_amp),
-                noise_seed=int(es.noise_seed),
-                climate_kind=str(es.climate_kind),
-                climate_strength=float(es.climate_strength),
-                k_sp=float(es.k_sp),
-                m_sp=float(es.m_sp),
-                n_sp=float(es.n_sp),
-                diffusivity=float(es.diffusivity),
-                uplift=float(es.uplift),
-                dt=float(es.dt),
-                steps=int(es.steps),
-                enable_overlay=bool(es.enable_overlay),
-                overlay_depth_m=float(es.overlay_depth_m),
-                overlay_w_macro_km=float(es.overlay_w_macro_km),
-                overlay_r=float(es.overlay_r),
-                target_peak_m=None,  # rescale AFTER upsample so the peak lands exactly
-                base=0.0,
-            )
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            self.report({"ERROR"}, f"Erosion failed: {e}")
-            return {"CANCELLED"}
+            # --- Run erosion (metrics computed pre-rescale, inside run_erosion) ---
+            try:
+                z_work, metrics = erosion.run_erosion(
+                    work_seed,
+                    cell_work_m,
+                    tile_km,
+                    work_w,
+                    noise_kind=str(es.noise_kind),
+                    noise_amp=float(es.noise_amp),
+                    noise_seed=int(es.noise_seed),
+                    climate_kind=str(es.climate_kind),
+                    climate_strength=float(es.climate_strength),
+                    k_sp=float(es.k_sp),
+                    m_sp=float(es.m_sp),
+                    n_sp=float(es.n_sp),
+                    diffusivity=float(es.diffusivity),
+                    uplift=float(es.uplift),
+                    dt=float(es.dt),
+                    steps=int(es.steps),
+                    enable_overlay=bool(es.enable_overlay),
+                    overlay_depth_m=float(es.overlay_depth_m),
+                    overlay_w_macro_km=float(es.overlay_w_macro_km),
+                    overlay_r=float(es.overlay_r),
+                    target_peak_m=None,  # rescale AFTER upsample so the peak lands exactly
+                    base=0.0,
+                )
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.report({"ERROR"}, f"Erosion failed: {e}")
+                return {"CANCELLED"}
 
-        # --- Upsample back to native crop size ---
-        if (work_w, work_h) != (W0, H0):
-            z_native = _resample_2d(z_work, W0, H0)
-        else:
-            z_native = z_work
+            # --- Upsample back to native crop size ---
+            if (work_w, work_h) != (W0, H0):
+                z_native = layers.resample_2d(z_work, W0, H0)
+            else:
+                z_native = z_work
 
-        # Fail loudly on numerical instability instead of silently shipping a corrupt (all-black)
-        # section: an unstable diffusivity/dt/steps combo can blow the LEM up to NaN/Inf, which
-        # would propagate through rescale_peak (z.max() -> nan) into the saved heightmap.
-        if not np.isfinite(z_native).all():
-            self.report({"ERROR"}, "Erosion became numerically unstable (NaN/Inf). Reduce "
-                                   "Diffusivity, Timestep (dt), or Steps and retry.")
-            return {"CANCELLED"}
+            # Fail loudly on numerical instability instead of silently shipping a corrupt (all-black)
+            # section: an unstable diffusivity/dt/steps combo can blow the LEM up to NaN/Inf, which
+            # would propagate through rescale_peak (z.max() -> nan) into the saved heightmap.
+            if not np.isfinite(z_native).all():
+                self.report({"ERROR"}, "Erosion became numerically unstable (NaN/Inf). Reduce "
+                                       "Diffusivity, Timestep (dt), or Steps and retry.")
+                return {"CANCELLED"}
 
-        z_native = erosion.rescale_peak(z_native, target_peak_m, base=0.0)
+            z_native = erosion.rescale_peak(z_native, target_peak_m, base=0.0)
+        finally:
+            wm.progress_end()
+            win.cursor_set("DEFAULT")
 
         # --- Encode SECTION-normalized (peak -> 1.0), matching the Gaea/Wilbur export convention the
         # reassembly pipeline expects. With Normalize Heights ON (default), Reassemble multiplies each
@@ -315,11 +320,12 @@ class PR_OT_erode_section(bpy.types.Operator):
         except Exception:
             pass
 
-        self.report({"INFO"}, f"Eroded {sec_id}/{hm_name}: {report}")
+        sec_name = str(sec.get("name", sec_id))
+        self.report({"INFO"}, f"Eroded '{sec_name}' ({sec_id}/{hm_name}): {report}")
         return {"FINISHED"}
 
 
-_CLASSES = (PR_OT_erode_section,)
+_CLASSES = (PP_OT_erode_section,)
 
 
 def register() -> None:

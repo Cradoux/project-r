@@ -8,6 +8,7 @@ import bpy
 
 from .. import manifest as manifest_lib
 from .. import imaging
+from .. import layers
 from ..projection_backend import ProjectionParams, project_hammer_array_to_equirect
 
 import numpy as np
@@ -48,80 +49,12 @@ class PP_OT_validate_processed(bpy.types.Operator):
         return {"FINISHED"}
 
 
-def _is_mask_name(name: str) -> bool:
-    n = name.lower()
-    return any(k in n for k in ("mask", "land", "plates", "labels"))
-
-
-def _is_height_name(name: str) -> bool:
-    n = name.lower()
-    return any(k in n for k in ("height", "elev", "dem"))
-
-
-def _interp_for_name(name: str) -> str:
-    if _is_mask_name(name):
-        return "nearest"
-    if _is_height_name(name):
-        return "linear"
-    return "linear"
-
-
-def _treat_as_color_name(name: str) -> bool:
-    if _is_mask_name(name) or _is_height_name(name):
-        return False
-    ext = Path(name).suffix.lower()
-    return ext in (".png", ".jpg", ".jpeg")
-
-
-def _resample_image(
-    pixels: np.ndarray,
-    scale_factor: float,
-) -> np.ndarray:
-    """
-    Resample an image by a scale factor using bilinear interpolation.
-    scale_factor > 1 = upscale (finer resolution), < 1 = downscale.
-    """
-    if abs(scale_factor - 1.0) < 0.001:
-        return pixels
-    
-    h, w = pixels.shape[:2]
-    new_h = max(1, int(round(h * scale_factor)))
-    new_w = max(1, int(round(w * scale_factor)))
-    
-    # Ensure we have 3D array
-    if pixels.ndim == 2:
-        pixels = pixels[..., None]
-    channels = pixels.shape[2]
-    
-    # Create coordinate grids for the new size
-    y_new = np.linspace(0, h - 1, new_h)
-    x_new = np.linspace(0, w - 1, new_w)
-    xx, yy = np.meshgrid(x_new, y_new)
-    
-    # Bilinear interpolation
-    x0 = np.floor(xx).astype(int)
-    y0 = np.floor(yy).astype(int)
-    x1 = np.minimum(x0 + 1, w - 1)
-    y1 = np.minimum(y0 + 1, h - 1)
-    
-    dx = xx - x0
-    dy = yy - y0
-    
-    output = np.zeros((new_h, new_w, channels), dtype=pixels.dtype)
-    for c in range(channels):
-        p = pixels[:, :, c]
-        v00 = p[y0, x0]
-        v01 = p[y0, x1]
-        v10 = p[y1, x0]
-        v11 = p[y1, x1]
-        output[:, :, c] = (
-            v00 * (1 - dx) * (1 - dy) +
-            v01 * dx * (1 - dy) +
-            v10 * (1 - dx) * dy +
-            v11 * dx * dy
-        )
-    
-    return output
+# Layer classification (mask/height/colour/interp) and the scale-factor resampler
+# now live in ..layers so section_ops, erode_ops and reassemble_ops can't disagree.
+_is_mask_name = layers.is_mask_name
+_interp_for_name = layers.interp_for_layer
+_treat_as_color_name = layers.treat_as_color
+_resample_image = layers.resample_by_scale
 
 
 # ---------------------------------------------------------------------------

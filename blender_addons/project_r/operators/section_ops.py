@@ -11,8 +11,10 @@ import bmesh
 import numpy as np
 import random
 
+from .. import deps
 from .. import geo
 from .. import imaging
+from .. import layers
 from .. import manifest as manifest_lib
 from ..projection_backend import ProjectionParams, project_equirect_to_hammer, project_equirect_array_to_hammer
 from . import sphere_ops
@@ -627,6 +629,18 @@ class PP_OT_create_section(bpy.types.Operator):
     bl_label = "Create Section"
     bl_description = "Create a Hammer (oblique) section crop from the selected faces and record it in manifest.json"
 
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        if context.mode != "EDIT_MESH":
+            cls.poll_message_set("Enter Edit Mode on the sphere and select the faces to export")
+            return False
+        s = getattr(context.scene, "projection_pasta", None)
+        mp = s.manifest_path() if s is not None else None
+        if mp is None or not mp.exists():
+            cls.poll_message_set("Open or create a project first")
+            return False
+        return True
+
     def execute(self, context: bpy.types.Context):
         s = context.scene.projection_pasta
         root = s.project_root_path()
@@ -693,8 +707,14 @@ class PP_OT_create_section(bpy.types.Operator):
             return {"CANCELLED"}
 
         sec_id = f"sec_{len(manifest.get('sections', [])) + 1:03d}_{s.new_section_name.lower()}"
-        (root / "sections" / sec_id).mkdir(parents=True, exist_ok=True)
-        (root / "processed" / sec_id).mkdir(parents=True, exist_ok=True)
+        sec_dir = root / "sections" / sec_id
+        proc_dir = root / "processed" / sec_id
+        # Track which dirs we actually create here, so failure-cleanup only removes
+        # our own work and never deletes a pre-existing section's data that happens
+        # to collide on this count-based id (e.g. after a manual manifest reset).
+        created_dirs = [d for d in (sec_dir, proc_dir) if not d.exists()]
+        sec_dir.mkdir(parents=True, exist_ok=True)
+        proc_dir.mkdir(parents=True, exist_ok=True)
 
         # ---- Update extracted overlay (per-section color) ----
         try:
@@ -797,11 +817,9 @@ class PP_OT_create_section(bpy.types.Operator):
         
         # Include the world map first (if it exists and isn't already in source/)
         world_map_info = manifest.get("global", {}).get("world_map", {})
-        world_map_path_str = world_map_info.get("path", "")
-        if world_map_path_str:
-            world_map_path = Path(world_map_path_str)
-            if world_map_path.exists() and world_map_path.suffix.lower() in IMAGE_EXTENSIONS:
-                source_maps.append(world_map_path)
+        world_map_path = manifest_lib.resolve_source_path(root, world_map_info.get("path", ""))
+        if world_map_path is not None and world_map_path.suffix.lower() in IMAGE_EXTENSIONS:
+            source_maps.append(world_map_path)
         
         # Add all maps from source/ folder
         if source_dir.exists():
@@ -814,62 +832,68 @@ class PP_OT_create_section(bpy.types.Operator):
         full_paths: dict[str, str] = {}
         crop_paths: dict[str, str] = {}
 
-        def _interp_for_layer(filename: str) -> str:
-            name = filename.lower()
-            if any(k in name for k in ("mask", "land", "plates", "labels")):
-                return "nearest"
-            return "linear"
-
-        def _treat_as_color(filename: str, ext: str) -> bool:
-            name = filename.lower()
-            if any(k in name for k in ("mask", "land", "plates", "labels")):
-                return False
-            if any(k in name for k in ("height", "elev", "dem")):
-                return False
-            # Treat typical PNG/JPG albedo-like maps as sRGB.
-            return ext in (".png", ".jpg", ".jpeg")
-
         print(f"[Project-R] Processing {len(source_maps)} source map(s)...")
-        
-        for src_path in source_maps:
-            filename = src_path.name
-            layer_id = src_path.stem  # filename without extension
-            ext = src_path.suffix.lower()
-            
-            full_rel = Path("sections") / sec_id / f"{filename.replace(ext, '')}__hammer_full{ext}"
-            crop_rel = Path("sections") / sec_id / "crops" / filename
-            full_path = (root / full_rel).resolve()
-            crop_path = (root / crop_rel).resolve()
-            crop_path.parent.mkdir(parents=True, exist_ok=True)
 
-            interp = _interp_for_layer(filename)
-            treat_as_color = _treat_as_color(filename, ext)
-            
-            print(f"[Project-R]   - {filename} (interp={interp}, color={treat_as_color})")
-            
-            project_equirect_to_hammer(
-                src_path=src_path,
-                dst_path=full_path,
-                dst_size=(full_w, full_h),
-                params=params,
-                interp=interp,  # type: ignore[arg-type]
-                treat_as_color=treat_as_color,
-            )
+        # Reprojecting every source map is the slow, blocking part. Show an honest
+        # busy cursor + status-bar progress, and on failure remove the partial
+        # section folders and report cleanly instead of throwing raw mid-write and
+        # leaving an orphan section directory with no manifest entry.
+        win = context.window
+        wm = context.window_manager
+        win.cursor_set("WAIT")
+        wm.progress_begin(0, max(1, len(source_maps)))
+        try:
+            for i, src_path in enumerate(source_maps):
+                wm.progress_update(i)
+                filename = src_path.name
+                layer_id = src_path.stem  # filename without extension
+                ext = src_path.suffix.lower()
 
-            full_img = imaging.load_image(full_path)
-            crop_img = imaging.crop(full_img, rect.x, rect.y, rect.w, rect.h)
-            # Save crop with same format as full_path
-            fmt, depth = (
-                ("OPEN_EXR", "32")
-                if ext == ".exr"
-                else ("PNG", "8" if treat_as_color else "16")
-                if ext == ".png"
-                else ("JPEG", None)
-            )
-            imaging.save_image(crop_img, crop_path, fmt, color_depth=depth)
+                full_rel = Path("sections") / sec_id / f"{filename.replace(ext, '')}__hammer_full{ext}"
+                crop_rel = Path("sections") / sec_id / "crops" / filename
+                full_path = (root / full_rel).resolve()
+                crop_path = (root / crop_rel).resolve()
+                crop_path.parent.mkdir(parents=True, exist_ok=True)
 
-            full_paths[layer_id] = str(full_rel).replace("\\", "/")
-            crop_paths[filename] = str(crop_rel).replace("\\", "/")
+                interp = layers.interp_for_layer(filename)
+                treat_as_color = layers.treat_as_color(filename)
+
+                print(f"[Project-R]   - {filename} (interp={interp}, color={treat_as_color})")
+
+                project_equirect_to_hammer(
+                    src_path=src_path,
+                    dst_path=full_path,
+                    dst_size=(full_w, full_h),
+                    params=params,
+                    interp=interp,  # type: ignore[arg-type]
+                    treat_as_color=treat_as_color,
+                )
+
+                full_img = imaging.load_image(full_path)
+                crop_img = imaging.crop(full_img, rect.x, rect.y, rect.w, rect.h)
+                # Save crop with same format as full_path
+                fmt, depth = (
+                    ("OPEN_EXR", "32")
+                    if ext == ".exr"
+                    else ("PNG", "8" if treat_as_color else "16")
+                    if ext == ".png"
+                    else ("JPEG", None)
+                )
+                imaging.save_image(crop_img, crop_path, fmt, color_depth=depth)
+
+                full_paths[layer_id] = str(full_rel).replace("\\", "/")
+                crop_paths[filename] = str(crop_rel).replace("\\", "/")
+        except Exception as e:
+            import traceback
+            import shutil
+            traceback.print_exc()
+            for d in created_dirs:
+                shutil.rmtree(d, ignore_errors=True)
+            self.report({"ERROR"}, f"Failed to build section '{s.new_section_name}': {e}")
+            return {"CANCELLED"}
+        finally:
+            wm.progress_end()
+            win.cursor_set("DEFAULT")
 
         # ---- Generate Effective Mask ----
         # New approach: create mask in equirect space, reproject to Hammer, then crop
@@ -964,6 +988,7 @@ class PP_OT_create_section(bpy.types.Operator):
                     print(f"[Project-R] Warning: Failed to analyze heightmap: {e}")
             else:
                 print(f"[Project-R] Warning: Heightmap '{heightmap_filename}' not found in crops")
+                self.report({"WARNING"}, f"Heightmap '{heightmap_filename}' not found in this section's crops; elevation not tracked")
 
         # Update source_maps in manifest
         manifest.setdefault("global", {})["source_maps"] = [f.name for f in source_maps]
@@ -1018,14 +1043,12 @@ class PP_OT_create_section(bpy.types.Operator):
         if elevation_info is not None:
             section_entry["elevation_info"] = elevation_info
         
-        manifest.setdefault("sections", []).append(section_entry)
-
-        manifest_lib.write_manifest(mp, manifest)
-        
-        # Also update planet_radius_km in global settings
+        # Write the manifest exactly once, with planet_radius_km folded in, so an
+        # interruption can't leave a section recorded without its global scale.
         manifest["global"]["planet_radius_km"] = planet_radius_km
+        manifest.setdefault("sections", []).append(section_entry)
         manifest_lib.write_manifest(mp, manifest)
-        
+
         # Write human-readable section_info.txt
         created_utc = dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
         _write_section_info_txt(
@@ -1047,10 +1070,30 @@ class PP_OT_create_section(bpy.types.Operator):
             elevation_info=elevation_info,
         )
         
+        # Make the just-created section the erosion target so the dropdown reflects
+        # it without the user re-finding it.
+        es = context.scene.projection_pasta_erosion
+        try:
+            es.section = sec_id
+        except Exception:
+            pass
+
         self.report(
             {"INFO"},
             f"Created section '{s.new_section_name}' - {extent_width_km:.0f} x {extent_height_km:.0f} km ({km_per_pixel:.2f} km/pixel)",
         )
+
+        # Optionally erode it right away, targeting this exact id (no last-section
+        # fallback). Skipped with a clear warning if landlab isn't installed.
+        if es.erode_on_create:
+            if deps.landlab_available():
+                bpy.ops.pp.erode_section(section_override=sec_id)
+            else:
+                self.report(
+                    {"WARNING"},
+                    "Section created, but landlab isn't installed -- skipped erosion. "
+                    "Click Install Dependencies.",
+                )
         return {"FINISHED"}
 
 

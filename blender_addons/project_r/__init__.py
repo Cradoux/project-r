@@ -1,136 +1,29 @@
 from __future__ import annotations
 
 import importlib
-import subprocess
-import sys
-import site
+import os
 
 import bpy
-from bpy.types import Operator
+from bpy.app.handlers import persistent
 
+# Legacy add-on metadata. On Blender 4.2+ the extension is described by
+# blender_manifest.toml (which takes precedence); bl_info is kept so the source
+# still loads if installed via the legacy "Install from Disk" path and to document
+# the version in one place. Keep the version in sync with blender_manifest.toml.
 bl_info = {
     "name": "Project-R",
     "author": "Project-R (Kilroys Katography) + AI",
-    "version": (0, 1, 0),
-    "blender": (4, 0, 0),
+    "version": (0, 2, 0),
+    "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Project-R",
-    "description": "Export Hammer (oblique) section crops from equirectangular maps and reassemble them back (powered by projectionpasta).",
+    "description": "Split equirectangular world maps into low-distortion Hammer sections, "
+                   "erode them in-Blender, and reassemble (powered by projectionpasta).",
     "category": "Import-Export",
 }
 
 
-def is_scipy_available() -> bool:
-    try:
-        ensure_user_site_on_path()
-        import scipy.ndimage
-        return True
-    except ImportError:
-        return False
-
-
-def is_pillow_available() -> bool:
-    try:
-        ensure_user_site_on_path()
-        from PIL import Image
-        # Verify the C extension actually works (this is what fails for the user)
-        Image.new("RGB", (1, 1))
-        return True
-    except Exception:
-        return False
-
-
-def is_landlab_available() -> bool:
-    try:
-        ensure_user_site_on_path()
-        import landlab  # noqa: F401
-        from landlab.components import FastscapeEroder, LinearDiffuser  # noqa: F401
-        return True
-    except Exception:
-        return False
-
-
-def is_priorityflood_available() -> bool:
-    """The fast GPL flow router (richdem). Optional: erosion falls back to an MIT router without it."""
-    try:
-        ensure_user_site_on_path()
-        from landlab.components import PriorityFloodFlowRouter  # noqa: F401
-        import richdem  # noqa: F401
-        return True
-    except Exception:
-        return False
-
-
-def ensure_user_site_on_path() -> None:
-    try:
-        user_site = site.getusersitepackages()
-    except Exception:
-        return
-
-    if user_site and user_site not in sys.path:
-        # Blender installs in Program Files often need user-site packages.
-        sys.path.append(user_site)
-
-
-class PP_OT_install_dependencies(Operator):
-    bl_idname = "pp.install_dependencies"
-    bl_label = "Install Dependencies"
-    bl_description = "Install required packages (Pillow, scipy, landlab, richdem) using Blender's Python pip"
-
-    def execute(self, context):
-        python = sys.executable
-        ensure_user_site_on_path()
-        try:
-            # Ensure pip is available
-            subprocess.check_call([python, "-m", "ensurepip", "--upgrade"])
-        except Exception:
-            pass  # pip may already be available
-
-        errors = []
-        warnings = []
-
-        def pip_install(args, label, fatal=True):
-            try:
-                subprocess.check_call([python, "-m", "pip", "install", "--user", *args])
-                return True
-            except Exception as e:
-                (errors if fatal else warnings).append(f"{label}: {e}")
-                return False
-
-        # Install/reinstall Pillow (force-reinstall to fix corrupted C extensions)
-        pip_install(["--upgrade", "--force-reinstall", "Pillow"], "Pillow")
-        # scipy (also a landlab dependency)
-        pip_install(["--upgrade", "scipy"], "scipy")
-        # landlab: the erosion engine (stream-power LEM + Incise-Flow)
-        pip_install(["--upgrade", "landlab"], "landlab")
-
-        # richdem: the fast GPL PriorityFloodFlowRouter. Optional — erosion falls back to the MIT
-        # DepressionFinderAndRouter without it. Try the canonical package, then the prebuilt wheel.
-        if not pip_install(["--upgrade", "richdem"], "richdem", fatal=False):
-            warnings[-1] += " (trying py-richdem wheel)"
-            if pip_install(["py-richdem"], "py-richdem", fatal=False):
-                warnings.pop()  # the wheel worked; drop the richdem failure note
-
-        if errors:
-            self.report({"ERROR"}, f"Failed to install: {'; '.join(errors)}")
-            return {"CANCELLED"}
-
-        if warnings:
-            self.report(
-                {"WARNING"},
-                "Core deps installed; richdem unavailable (erosion will use the slower MIT router). "
-                "Restart Blender. See console for details.",
-            )
-            for w in warnings:
-                print(f"[Project-R] Dependency warning: {w}")
-            return {"FINISHED"}
-
-        self.report(
-            {"INFO"},
-            "Dependencies installed (user site). Please restart Blender."
-        )
-        return {"FINISHED"}
-
-
+from . import deps as _deps
+from . import layers as _layers  # noqa: F401  (pure helper; imported so dev-reload covers it)
 from . import props as _props
 from . import ui as _ui
 from .operators import erode_ops as _erode_ops
@@ -141,6 +34,7 @@ from .operators import sphere_ops as _sphere_ops
 
 
 _MODULES = (
+    _deps,
     _props,
     _project_ops,
     _sphere_ops,
@@ -152,19 +46,51 @@ _MODULES = (
 
 
 def _reload_modules_for_dev() -> None:
-    # Helpful during development: Blender reloads addons without restarting,
-    # but submodules can remain cached.
-    # Reload pure helper modules first so operator modules pick up their changes.
-    from . import erosion as _erosion
-    importlib.reload(_erosion)
+    # Development convenience (opt-in via the PROJECT_R_DEV env var). Blender
+    # re-registers an addon without restarting, but `import` returns the cached
+    # submodule from sys.modules, so edits to helper modules stay invisible until
+    # reloaded explicitly. Reload leaf helpers first so the operator/UI modules
+    # pick up fresh helper code; order matters for `from X import name` imports.
+    # (The vendored projectionpasta is loaded lazily and rarely edited -- restart
+    # Blender if you change it.) This used to run on every enable, including for
+    # end users; gating it keeps production registration to just class registration.
+    from . import imaging, geo, manifest, erosion, projection_backend, layers, deps
+    for m in (imaging, geo, manifest, erosion, projection_backend, layers, deps):
+        importlib.reload(m)
     for m in _MODULES:
         importlib.reload(m)
 
 
-def register() -> None:
-    _reload_modules_for_dev()
+def _seed_default_root():
+    """Seed the scene's project_root from the addon preference when it's empty.
 
-    bpy.utils.register_class(PP_OT_install_dependencies)
+    Setting the property fires its update callback, which auto-loads the project
+    if that folder already has a manifest.json. Runs from a timer so it executes
+    in a normal (non-restricted) context."""
+    try:
+        addon = bpy.context.preferences.addons.get(__package__)
+        default_root = getattr(addon.preferences, "default_project_root", "") if addon else ""
+        scene = getattr(bpy.context, "scene", None)
+        s = getattr(scene, "projection_pasta", None) if scene is not None else None
+        if s is not None and not s.project_root and default_root:
+            s.project_root = default_root
+    except Exception:
+        pass
+    return None  # one-shot
+
+
+@persistent
+def _on_load_post(_dummy) -> None:
+    # After a .blend opens, (re)seed + auto-load via a one-shot timer.
+    try:
+        bpy.app.timers.register(_seed_default_root, first_interval=0.0)
+    except Exception:
+        pass
+
+
+def register() -> None:
+    if os.environ.get("PROJECT_R_DEV"):
+        _reload_modules_for_dev()
 
     for m in _MODULES:
         if hasattr(m, "register"):
@@ -177,8 +103,27 @@ def register() -> None:
         type=_props.ProjectionPastaErosionSettings
     )
 
+    if _on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load_post)
+    try:
+        bpy.app.timers.register(_seed_default_root, first_interval=0.0)
+    except Exception:
+        pass
+
 
 def unregister() -> None:
+    if _on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_post)
+
+    # Drop any pending one-shot timers so disabling (or re-enabling) the addon can't
+    # fire a stale auto-load/seed callback after its module state is gone.
+    for fn in (_seed_default_root, getattr(_props, "_deferred_load_project", None)):
+        try:
+            if fn is not None and bpy.app.timers.is_registered(fn):
+                bpy.app.timers.unregister(fn)
+        except Exception:
+            pass
+
     if hasattr(bpy.types.Scene, "projection_pasta_erosion"):
         del bpy.types.Scene.projection_pasta_erosion
     if hasattr(bpy.types.Scene, "projection_pasta"):
@@ -187,7 +132,3 @@ def unregister() -> None:
     for m in reversed(_MODULES):
         if hasattr(m, "unregister"):
             m.unregister()
-
-    bpy.utils.unregister_class(PP_OT_install_dependencies)
-
-

@@ -3,7 +3,7 @@ from __future__ import annotations
 import bpy
 from bpy.types import Panel
 
-from . import is_scipy_available, is_pillow_available, is_landlab_available, is_priorityflood_available
+from . import deps
 
 
 class PP_PT_main(Panel):
@@ -15,35 +15,45 @@ class PP_PT_main(Panel):
 
     def draw(self, context: bpy.types.Context) -> None:
         s = context.scene.projection_pasta
+        es = context.scene.projection_pasta_erosion
         layout = self.layout
 
-        # Dependencies check
-        missing_deps = []
-        if not is_pillow_available():
-            missing_deps.append("Pillow")
-        if not is_scipy_available():
-            missing_deps.append("scipy")
+        installing = deps.PP_OT_install_dependencies.is_running()
 
-        if missing_deps:
+        # --- Dependencies (cached checks; no heavy imports in draw) ---
+        missing = deps.missing_required()
+        if missing or installing:
             box = layout.box()
-            box.alert = True
-            box.label(text=f"Missing: {', '.join(missing_deps)}", icon="ERROR")
-            box.operator("pp.install_dependencies", text="Install Dependencies")
-            box.label(text="(Restart Blender after install)")
+            if installing:
+                box.label(text="Installing dependencies... (see status bar)", icon="SORTTIME")
+            else:
+                box.alert = True
+                box.label(text=f"Missing: {', '.join(missing)}", icon="ERROR")
+            row = box.row()
+            row.enabled = not installing
+            row.operator("pp.install_dependencies", text="Install Dependencies", icon="IMPORT")
+            box.label(text="Installs in the background; no restart needed.")
 
+        # --- Project ---
         box = layout.box()
         box.label(text="Project")
         box.prop(s, "project_root")
         box.prop(s, "planet_radius_km")
         box.prop(s, "max_elevation_m")
+
+        mp = s.manifest_path()
+        has_project = bool(mp and mp.exists())
         row = box.row(align=True)
-        row.operator("pp.init_project", text="Init Project")
+        if has_project:
+            row.operator("pp.open_project", text="Reload Project", icon="FILE_REFRESH")
+        else:
+            row.operator("pp.init_project", text="Create Project", icon="NEWFOLDER")
         row.operator("pp.open_manifest", text="Open manifest.json")
 
+        # --- Sphere ---
         box = layout.box()
         box.label(text="Sphere")
-        box.operator("pp.load_world_map", text="Load World Map")
-        # Heightmap selector - show filename if set
+        box.operator("pp.load_world_map", text="Load World Map", icon="WORLD")
         hm_label = f"Heightmap: {s.heightmap_filename}" if s.heightmap_filename else "Select Heightmap (optional)"
         box.operator("pp.select_heightmap", text=hm_label)
         row = box.row(align=True)
@@ -51,45 +61,45 @@ class PP_PT_main(Panel):
         row.operator("pp.shrink_selection", text="Reduce")
         box.prop(s, "overlay_opacity")
 
+        # --- Section Export ---
         box = layout.box()
         box.label(text="Section Export")
         box.prop(s, "new_section_name")
         box.prop(s, "square_crop")
         box.prop(s, "feather_px")
-        
-        # Advanced options (collapsed by default)
+
+        # Advanced options: disclosure state is now separate from the functional
+        # override toggle, so peeking at the fields no longer flips the override on.
         adv_box = box.box()
-        adv_row = adv_box.row()
-        adv_row.prop(
-            s, "override_projection_center",
-            icon="TRIA_DOWN" if s.override_projection_center else "TRIA_RIGHT",
+        adv_box.prop(
+            s, "show_advanced_section",
+            icon="TRIA_DOWN" if s.show_advanced_section else "TRIA_RIGHT",
             text="Advanced Options",
-            emboss=False
+            emboss=False,
         )
-        if s.override_projection_center:
+        if s.show_advanced_section:
+            adv_box.prop(s, "override_projection_center")
             col = adv_box.column(align=True)
+            col.enabled = s.override_projection_center
             col.prop(s, "override_center_lon")
             col.prop(s, "override_center_lat")
-        
-        box.operator("pp.create_section", text="Create Section from Selected Faces")
+
+        box.prop(es, "erode_on_create")
+        box.operator("pp.create_section", text="Create Section from Selected Faces", icon="UV_FACESEL")
 
         # --- Erosion ---
-        es = context.scene.projection_pasta_erosion
         box = layout.box()
         box.label(text="Erosion", icon="MOD_FLUIDSIM")
 
-        if not is_landlab_available():
-            warn = box.box()
-            warn.alert = True
-            warn.label(text="landlab not installed", icon="ERROR")
-            warn.operator("pp.install_dependencies", text="Install Dependencies")
+        if not deps.landlab_available():
+            box.label(text="Install dependencies to enable erosion", icon="INFO")
         else:
-            if is_priorityflood_available():
+            if deps.priorityflood_available():
                 box.label(text="Router: PriorityFlood (GPL, fast)", icon="CHECKMARK")
             else:
                 box.label(text="Router: MIT fallback (slower)", icon="INFO")
 
-            box.prop(es, "section_id", text="Section")
+            box.prop(es, "section")
 
             col = box.column(align=True)
             col.prop(es, "noise_kind")
@@ -99,11 +109,13 @@ class PP_PT_main(Panel):
             col.prop(es, "climate_kind")
             col.prop(es, "climate_strength")
 
+            # Steps + erodibility + work resolution: the three controls that set how
+            # long a run takes and how crisp it is, kept together at the top level.
             col = box.column(align=True)
             col.prop(es, "steps")
             col.prop(es, "k_sp")
+            col.prop(es, "max_work_px")
 
-            # Advanced LEM (collapsed)
             adv = box.box()
             adv.prop(
                 es, "show_lem_advanced",
@@ -119,9 +131,7 @@ class PP_PT_main(Panel):
                 c.prop(es, "uplift")
                 c.prop(es, "dt")
                 c.prop(es, "noise_seed")
-                c.prop(es, "max_work_px")
 
-            # Wilbur overlay
             ov = box.box()
             ov.prop(es, "enable_overlay")
             if es.enable_overlay:
@@ -131,7 +141,7 @@ class PP_PT_main(Panel):
                 c.prop(es, "overlay_r")
 
             box.prop(es, "target_peak_m")
-            box.operator("pr.erode_section", text="Erode Section", icon="MOD_FLUIDSIM")
+            box.operator("pp.erode_section", text="Erode Section", icon="MOD_FLUIDSIM")
 
             if es.last_report:
                 rb = box.box()
@@ -142,6 +152,7 @@ class PP_PT_main(Panel):
                 )
                 rb.label(text=f"{es.last_router}  {es.last_secs:.1f}s")
 
+        # --- Reassembly ---
         box = layout.box()
         box.label(text="Reassembly")
         box.prop(s, "extend_edge_colors")
@@ -157,5 +168,3 @@ def register() -> None:
 
 def unregister() -> None:
     bpy.utils.unregister_class(PP_PT_main)
-
-
