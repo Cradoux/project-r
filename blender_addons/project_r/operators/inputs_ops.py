@@ -28,6 +28,9 @@ from bpy.types import Operator
 from .. import decode
 from .. import imaging
 from .. import layers
+from .. import manifest as manifest_lib
+from ..projection_backend import ProjectionParams, project_equirect_array_to_hammer
+from . import erode_ops
 
 
 def _source_dir(context) -> Optional[Path]:
@@ -202,13 +205,100 @@ class PP_OT_detect_source_maps(Operator):
         return {"FINISHED"}
 
 
+def _reproject_categorical_to_section(rgb: np.ndarray, sec: dict, root: Path) -> np.ndarray:
+    """Reproject an equirect categorical map (H,W,3 uint8) into a section's exact
+    oblique-Hammer crop using NEAREST sampling (so no in-between class colours are
+    invented), sized to the section's exported heightmap crop. Returns uint8 RGB.
+    """
+    proj = sec.get("projection", {}) or {}
+    params = ProjectionParams(
+        center_lon_deg=float(proj.get("center_lon_deg", 0.0)),
+        center_lat_deg=float(proj.get("center_lat_deg", 0.0)),
+        rot_deg=float(proj.get("rot_deg", 0.0)),
+    )
+    full = sec.get("full_canvas", {}).get("size", None)
+    rect = (sec.get("crop", {}) or {}).get("rect_xywh", None)
+    if not full or not rect:
+        raise ValueError("section is missing full_canvas size / crop rect (recreate the section)")
+    full_w, full_h = int(full[0]), int(full[1])
+    x, y, w, h = (int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3]))
+
+    data = rgb.astype(np.float32) / 255.0
+    hammer = project_equirect_array_to_hammer(
+        data_in=data, dst_size=(full_w, full_h), params=params,
+        interp="nearest", treat_as_color=False,
+    )
+    crop = hammer[y:y + h, x:x + w, :3]
+
+    # Match the section's exported heightmap-crop size so the masks register 1:1 with
+    # the terrain taken into Gaea. Nearest resize keeps exact palette colours.
+    target = _section_crop_size(sec, root)
+    if target is not None and target != (crop.shape[1], crop.shape[0]):
+        crop = imaging.resize_to(crop, target[0], target[1], interp="nearest")
+    return (np.clip(crop, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+
+def _section_crop_size(sec: dict, root: Path):
+    """(W,H) of the section's heightmap crop, so masks can match it. None if unknown.
+    Crop paths are stored relative to the project root, so resolve against it."""
+    crop_paths = (sec.get("crop", {}) or {}).get("paths_by_layer", {}) or {}
+    hm = erode_ops._find_heightmap_filename(sec, "")
+    target_rel = crop_paths.get(hm) if hm else None
+    if not target_rel:
+        target_rel = next(iter(crop_paths.values()), None)  # any crop
+    if target_rel:
+        try:
+            from PIL import Image as PILImage
+            with PILImage.open(root / target_rel) as im:
+                return (int(im.size[0]), int(im.size[1]))
+        except Exception:
+            pass
+    rect = (sec.get("crop", {}) or {}).get("rect_xywh", None)
+    if rect:
+        return (int(rect[2]), int(rect[3]))
+    return None
+
+
+def _write_class_masks(out_dir: Path, stem: str, rgb: np.ndarray, *, koppen: bool, skip_white: bool):
+    """Split a categorical RGB raster and write one hard 8-bit mask per class plus a
+    palette.json. Returns (n_written, split_result)."""
+    res = decode.split_categorical(rgb, koppen=koppen)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    assign = res["assignment"]
+    written = 0
+    from PIL import Image as PILImage
+    for c in res["classes"]:
+        if c["is_white_bg"] and skip_white:
+            continue
+        mask = np.where(assign == c["index"], np.uint8(255), np.uint8(0))
+        label = f"_{c['koppen_guess']}" if koppen else ""
+        fname = f"{stem}_mask_{c['index']:02d}_{c['hex']}{label}.png"
+        PILImage.fromarray(mask).save(out_dir / fname)  # uint8 2D -> mode 'L'
+        written += 1
+    (out_dir / f"{stem}_palette.json").write_text(
+        json.dumps({"n_classes": res["n_classes"], "n_unique_colors_raw": res["n_unique_colors_raw"],
+                    "masks_written": written, "classes": res["classes"]}, indent=2),
+        encoding="utf-8",
+    )
+    return written, res
+
+
 class PP_OT_export_class_masks(Operator):
     bl_idname = "pp.export_class_masks"
     bl_label = "Export Class Masks"
     bl_description = ("Split a categorical map (Biome / Koppen / ...) into one black-and-white mask "
-                     "per class for use as Gaea masks. Writes 8-bit hard masks + a palette.json to "
-                     "masks/<map>/ in the project")
+                     "per class for use as Gaea masks. GLOBAL writes the full equirect map; SECTION "
+                     "reprojects it into the erosion-target section's exact crop so the masks align "
+                     "with the terrain you take into Gaea")
 
+    scope: bpy.props.EnumProperty(  # type: ignore[valid-type]
+        items=[
+            ("GLOBAL", "Global", "Split the whole equirectangular map"),
+            ("SECTION", "Section", "Reproject into the erosion-target section's Hammer crop"),
+        ],
+        default="GLOBAL",
+        options={"SKIP_SAVE"},
+    )
     filepath: bpy.props.StringProperty(subtype="FILE_PATH", default="", options={"SKIP_SAVE"})  # type: ignore[valid-type]
     koppen: bpy.props.BoolProperty(  # type: ignore[valid-type]
         name="Auto-name Köppen classes",
@@ -240,12 +330,12 @@ class PP_OT_export_class_masks(Operator):
         if not self.filepath:
             self.report({"ERROR"}, "No categorical map selected")
             return {"CANCELLED"}
-        root = context.scene.projection_pasta.project_root_path()
+        s = context.scene.projection_pasta
+        root = s.project_root_path()
         if root is None:
             self.report({"ERROR"}, "Project Root is not set")
             return {"CANCELLED"}
         src_path = Path(self.filepath)
-        # Auto-enable Köppen labelling when the filename says so.
         koppen = bool(self.koppen) or ("koppen" in src_path.stem.lower())
 
         try:
@@ -255,38 +345,48 @@ class PP_OT_export_class_masks(Operator):
             self.report({"ERROR"}, f"Failed to load map: {e}")
             return {"CANCELLED"}
 
-        res = decode.split_categorical(rgb, koppen=koppen)
-        if res["n_unique_colors_raw"] > 1500:
-            self.report({"WARNING"}, f"{src_path.name} has {res['n_unique_colors_raw']} colours -- "
-                                     f"this may not be a categorical map; exporting the {res['n_classes']} "
-                                     f"dominant classes anyway.")
+        if rgb.shape[0] * rgb.shape[1] and decode.detect_palette(rgb)[1] > 1500:
+            self.report({"WARNING"}, f"{src_path.name} has many colours -- this may not be a "
+                                     f"categorical map; exporting the dominant classes anyway.")
 
-        out_dir = root / "masks" / src_path.stem
-        out_dir.mkdir(parents=True, exist_ok=True)
-        assign = res["assignment"]
-        written = 0
+        # SECTION scope: reproject the categorical map into the target section's crop first.
+        sec_id = None
+        if self.scope == "SECTION":
+            mp = s.manifest_path()
+            if mp is None or not mp.exists():
+                self.report({"ERROR"}, "No project manifest; create a project and a section first")
+                return {"CANCELLED"}
+            es = context.scene.projection_pasta_erosion
+            manifest = manifest_lib.read_manifest(mp)
+            sec = erode_ops._resolve_section(manifest, (es.section or "").strip())
+            if sec is None:
+                self.report({"ERROR"}, "No matching section (pick one in the Erosion panel, or create a section)")
+                return {"CANCELLED"}
+            sec_id = str(sec.get("id", ""))
+            win = context.window
+            win.cursor_set("WAIT")
+            try:
+                rgb = _reproject_categorical_to_section(rgb, sec, root)
+            except Exception as e:
+                self.report({"ERROR"}, f"Section reprojection failed: {e}")
+                return {"CANCELLED"}
+            finally:
+                win.cursor_set("DEFAULT")
+            out_dir = root / "sections" / sec_id / "masks" / src_path.stem
+            where = f"sections/{sec_id}/masks/{src_path.stem}/"
+        else:
+            out_dir = root / "masks" / src_path.stem
+            where = f"masks/{src_path.stem}/"
+
         try:
-            from PIL import Image as PILImage
-            for c in res["classes"]:
-                if c["is_white_bg"] and self.skip_white:
-                    continue
-                mask = np.where(assign == c["index"], np.uint8(255), np.uint8(0))
-                label = f"_{c['koppen_guess']}" if koppen else ""
-                fname = f"{src_path.stem}_mask_{c['index']:02d}_{c['hex']}{label}.png"
-                PILImage.fromarray(mask).save(out_dir / fname)  # mode 'L' from uint8 2D
-                written += 1
+            written, res = _write_class_masks(out_dir, src_path.stem, rgb,
+                                              koppen=koppen, skip_white=self.skip_white)
         except Exception as e:
             self.report({"ERROR"}, f"Failed writing masks: {e}")
             return {"CANCELLED"}
 
-        (out_dir / f"{src_path.stem}_palette.json").write_text(
-            json.dumps({"source": str(src_path), "n_classes": res["n_classes"],
-                        "n_unique_colors_raw": res["n_unique_colors_raw"],
-                        "masks_written": written, "classes": res["classes"]}, indent=2),
-            encoding="utf-8",
-        )
         print(f"[Project-R] Exported {written} class masks -> {out_dir}")
-        self.report({"INFO"}, f"Exported {written} class masks to masks/{src_path.stem}/"
+        self.report({"INFO"}, f"Exported {written} class masks to {where}"
                               + (" (Köppen-named)" if koppen else ""))
         return {"FINISHED"}
 

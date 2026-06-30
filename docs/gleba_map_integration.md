@@ -210,6 +210,9 @@ Koppen against the real export:
 **Scope:** Biome + Koppen for now (the script generalises to any categorical map listed in the catalog —
 RockType, GeologicProvince, plates, Vegetation, Waterbodies — when we choose to extend it).
 
+**Status:** IMPLEMENTED in the Map Inputs panel (`pp.export_class_masks`, GLOBAL + SECTION scope). The notes below
+describe that design.
+
 **UI / pipeline integration:** add an **"Export class masks"** action on the categorical layer slots
 (Biome/Koppen) in the Map Inputs panel. Run it in **two modes**, reusing the same nearest-palette decode:
 - **Global:** split the 4096×2048 equirect map → `source/<layer>_masks/*.png` + `*_palette.json`.

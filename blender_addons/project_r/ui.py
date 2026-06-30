@@ -114,7 +114,9 @@ class PP_PT_inputs(_PRPanel, Panel):
         box = layout.box()
         box.label(text="Category Masks (for Gaea)", icon="MOD_MASK")
         box.label(text="Biome / Koppen -> one B&W mask per class")
-        box.operator("pp.export_class_masks", text="Export Class Masks...", icon="EXPORT")
+        box.operator("pp.export_class_masks", text="Global Masks...", icon="EXPORT").scope = "GLOBAL"
+        box.operator("pp.export_class_masks", text="Section Masks...", icon="EXPORT").scope = "SECTION"
+        box.label(text="Section uses the Erosion panel's target", icon="INFO")
 
 
 # ---------------------------------------------------------------------------
