@@ -983,14 +983,14 @@ class PP_OT_create_section(bpy.types.Operator):
                         # Use first channel for greyscale
                         hm_pixels = hm_pixels[:, :, 0]
                     
-                    # Upscale effective mask to match crop size for masking
-                    mask_for_hm = imaging.resize_double_bilinear(effective_mask[..., None])[:, :, 0]
-                    # Clamp to heightmap size
-                    mask_for_hm = mask_for_hm[:hm_pixels.shape[0], :hm_pixels.shape[1]]
-                    if mask_for_hm.shape[0] < hm_pixels.shape[0] or mask_for_hm.shape[1] < hm_pixels.shape[1]:
-                        padded = np.zeros(hm_pixels.shape, dtype=np.float32)
-                        padded[:mask_for_hm.shape[0], :mask_for_hm.shape[1]] = mask_for_hm
-                        mask_for_hm = padded
+                    # Resample the effective mask (stored at half the NATIVE crop rect) to
+                    # the heightmap crop's ACTUAL size. The exported crop may be a different
+                    # resolution than the rect -- Output Resolution / World Map Res can up- or
+                    # down-scale it -- so the old fixed double+pad pinned the mask to the
+                    # top-left corner (Hammer-projection background) and read a false 0 m
+                    # elevation. Scaling to hm_pixels keeps it aligned at any crop size.
+                    mask_for_hm = layers.resample_2d(
+                        effective_mask.astype(np.float32), hm_pixels.shape[1], hm_pixels.shape[0])
                     
                     # Find min/max brightness only where mask > 0.5
                     valid_pixels = hm_pixels[mask_for_hm > 0.5]
