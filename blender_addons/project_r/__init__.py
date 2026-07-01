@@ -23,10 +23,12 @@ bl_info = {
 
 
 from . import deps as _deps
+from . import decode as _decode  # noqa: F401  (pure helper; imported so dev-reload covers it)
 from . import layers as _layers  # noqa: F401  (pure helper; imported so dev-reload covers it)
 from . import props as _props
 from . import ui as _ui
 from .operators import erode_ops as _erode_ops
+from .operators import inputs_ops as _inputs_ops
 from .operators import project_ops as _project_ops
 from .operators import reassemble_ops as _reassemble_ops
 from .operators import section_ops as _section_ops
@@ -38,6 +40,7 @@ _MODULES = (
     _props,
     _project_ops,
     _sphere_ops,
+    _inputs_ops,
     _section_ops,
     _reassemble_ops,
     _erode_ops,
@@ -54,8 +57,8 @@ def _reload_modules_for_dev() -> None:
     # (The vendored projectionpasta is loaded lazily and rarely edited -- restart
     # Blender if you change it.) This used to run on every enable, including for
     # end users; gating it keeps production registration to just class registration.
-    from . import imaging, geo, manifest, erosion, projection_backend, layers, deps
-    for m in (imaging, geo, manifest, erosion, projection_backend, layers, deps):
+    from . import imaging, geo, manifest, erosion, projection_backend, layers, deps, decode
+    for m in (imaging, geo, manifest, erosion, projection_backend, layers, deps, decode):
         importlib.reload(m)
     for m in _MODULES:
         importlib.reload(m)

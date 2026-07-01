@@ -22,6 +22,24 @@ HEIGHT_KEYWORDS = ("height", "elev", "dem")
 MASK_KEYWORDS = ("mask", "land", "plates", "labels")
 RAINFALL_KEYWORDS = ("rain", "precip")
 
+# Roles for the optional Map Inputs panel. Used for folder auto-detection of the
+# Gleba export set (consistent filenames) and to drive decode/interp choices.
+WORLD_KEYWORDS = ("truecolor", "colorsmooth", "coloursmooth")
+BATHY_KEYWORDS = ("bathy",)
+LANDSEA_KEYWORDS = ("landvssea", "landsea", "crustmap", "island")
+UPLIFT_KEYWORDS = ("orogeny", "uplift")
+# Erodibility uses a CONTINUOUS softness proxy: SoilDepth (a viridis ramp where deep soil
+# = thick erodible regolith). Categorical rock-type maps are intentionally NOT used here --
+# they'd need a per-class legend to order hardness, which isn't available.
+ERODIBILITY_KEYWORDS = ("soildepth",)
+# Semantic classification rasters (Köppen/climate, biome, rock type, geologic province,
+# tectonic plates, ...) whose distinct colours are classes. Section creation splits any of
+# these it finds in source/ into one B&W mask per class for downstream Gaea use. Kept
+# separate from MASK_KEYWORDS (which only drives reprojection interp): these are the maps
+# the auto class-mask export recognises by name.
+CATEGORICAL_KEYWORDS = ("koppen", "climate", "biome", "rocktype", "geolog", "province",
+                        "litholog", "terrane", "plates", "landcover", "landform")
+
 _COLOR_EXTS = (".png", ".jpg", ".jpeg")
 
 
@@ -35,15 +53,109 @@ def is_mask_name(name: str) -> bool:
     return any(k in n for k in MASK_KEYWORDS)
 
 
+def _tokens(name: str):
+    """Split a filename stem into lowercase tokens, breaking on BOTH non-alphanumeric
+    separators AND camelCase/PascalCase boundaries -- so 'AverageRainfall' (the Gleba
+    naming, no delimiters) tokenizes to ['average', 'rainfall'] while 'terrain' stays a
+    single token (so 'rain' as a token-start still doesn't match it)."""
+    stem = Path(name).stem
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", stem)
+    return re.split(r"[^a-z0-9]+", spaced.lower())
+
+
 def is_rainfall_name(name: str) -> bool:
     # Token-based (not raw substring): 'rain' must START a name token, so 'rainfall'
-    # and 'rain_map' match but 'terrain' does NOT (it would silently feed a terrain
+    # and 'RainShadow' match but 'terrain' does NOT (it would silently feed a terrain
     # heightmap in as the rainfall field). Also never classify a height/mask layer
     # as rainfall.
     if is_height_name(name) or is_mask_name(name):
         return False
-    tokens = re.split(r"[^a-z0-9]+", Path(name).stem.lower())
+    tokens = _tokens(name)
     return any(t.startswith(k) for t in tokens for k in RAINFALL_KEYWORDS)
+
+
+def _has_kw(name: str, keywords) -> bool:
+    n = name.lower()
+    return any(k in n for k in keywords)
+
+
+def is_world_name(name: str) -> bool:
+    """An sRGB display image for the preview sphere (TrueColor / colour hypsometric)."""
+    return _has_kw(name, WORLD_KEYWORDS)
+
+
+def is_bathy_name(name: str) -> bool:
+    """Carries sub-sea-level depth (the combined elevation+bathymetry export)."""
+    return _has_kw(name, BATHY_KEYWORDS)
+
+
+def is_landsea_name(name: str) -> bool:
+    """A purpose-built land/sea or coastline mask."""
+    return _has_kw(name, LANDSEA_KEYWORDS)
+
+
+def is_uplift_name(name: str) -> bool:
+    """A tectonic-uplift / orogeny intensity field."""
+    return _has_kw(name, UPLIFT_KEYWORDS)
+
+
+def is_erodibility_name(name: str) -> bool:
+    """A lithology / geology map usable as a spatial erodibility (K_sp) field."""
+    return _has_kw(name, ERODIBILITY_KEYWORDS)
+
+
+def is_categorical_name(name: str) -> bool:
+    """A categorical classification raster (Köppen/biome/rock-type/geologic province/
+    plates/...) whose distinct colours are classes -- the maps the auto class-mask
+    export splits into one B&W mask per class."""
+    return _has_kw(name, CATEGORICAL_KEYWORDS)
+
+
+def classify_source_folder(filenames):
+    """Map a folder's image filenames to Project-R input slots, resolving the
+    documented competitions between sibling Gleba exports. Returns a dict
+    ``{slot: best_filename or ""}`` for every slot. Pure: takes plain filenames.
+
+    Resolution rules (see docs/gleba_map_integration.md):
+      heightmap   prefer *Land (ocean hard-zeroed = sea level, the encoding Project-R's
+                  height=brightness*max_elev expects) > plain greyscale; EXCLUDE the
+                  *Bathymetry variant (its land is clamped white -- no land relief) and
+                  colour images (they match 'elev' but are 8-bit display).
+      bathymetry  the *Bathymetry variant (ocean-depth gradient); decoded 1-norm on load.
+      rainfall    prefer Average* > January/July; never the RainShadow dryness map.
+      world_map   prefer TrueColor > colour hypsometric.
+    """
+    names = [str(n) for n in filenames]
+
+    def best(include, *, prefer=(), exclude=()):
+        cands = [n for n in names
+                 if include(n) and not any(e in n.lower() for e in exclude)]
+        if not cands:
+            return ""
+
+        def score(n):
+            low = n.lower()
+            for i, p in enumerate(prefer):
+                if p in low:
+                    return i
+            return len(prefer)
+
+        cands.sort(key=lambda n: (score(n), n.lower()))
+        return cands[0]
+
+    return {
+        "heightmap": best(lambda n: is_height_name(n) and not treat_as_color(n),
+                          prefer=("land", "greyscale", "grayscale"),
+                          exclude=("color", "colour", "bathymetry")),
+        "bathymetry": best(is_bathy_name, prefer=("bathymetry",)),
+        "rainfall": best(is_rainfall_name,
+                         prefer=("averagerainfall", "rainfall", "precip"),
+                         exclude=("shadow",)),
+        "world_map": best(is_world_name, prefer=("truecolor",)),
+        "landsea_mask": best(is_landsea_name, prefer=("landvssea",)),
+        "uplift": best(is_uplift_name, prefer=("orogeny",)),
+        "erodibility": best(is_erodibility_name, prefer=("soildepth",)),
+    }
 
 
 def interp_for_layer(name: str) -> str:
@@ -54,8 +166,14 @@ def interp_for_layer(name: str) -> str:
 
 def treat_as_color(name: str) -> bool:
     """Whether a layer is an sRGB colour image (vs linear data like a heightmap, a
-    rainfall map, or a categorical mask). Drives 8-bit-sRGB vs 16-bit-linear encode."""
-    if is_mask_name(name) or is_height_name(name) or is_rainfall_name(name):
+    rainfall/bathymetry map, or a categorical mask). Drives 8-bit-sRGB vs 16-bit-linear
+    encode -- so single-channel data crops stay 16-bit, not collapsed to 8-bit colour."""
+    n = name.lower()
+    # Our decoded single-channel caches (rainfall/uplift/erodibility/bathymetry) are 16-bit
+    # data, never sRGB colour -- recognise them by the cache marker regardless of stem.
+    if "__decoded" in n or "__bathy" in n:
+        return False
+    if is_mask_name(name) or is_height_name(name) or is_rainfall_name(name) or is_bathy_name(name):
         return False
     return Path(name).suffix.lower() in _COLOR_EXTS
 

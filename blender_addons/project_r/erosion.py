@@ -73,7 +73,7 @@ _INTENSITY = {
 }
 
 
-STANDARD_RESOLUTIONS = (512, 1024, 2048, 4096, 8192)
+STANDARD_RESOLUTIONS = (512, 1024, 2048, 4096, 8192, 16384)
 AUTO_RES_CAP = 1024  # AUTO stays responsive; choose a fixed size for more detail
 
 
@@ -103,6 +103,55 @@ def resolve_resolution(choice: str, native_px: float) -> int:
         return max(64, int(c))
     except (TypeError, ValueError):
         return suggest_resolution(native_px)
+
+
+def resolve_world_resolution(target_choice: str, world_long: float) -> int:
+    """Concrete longest-edge px of the FINAL reassembled world map. 'Auto' keeps the
+    loaded world map's own size; otherwise the explicit target number. This single knob
+    (set at the top of the panel) drives both reassembly and every section's AUTO detail."""
+    c = (target_choice or "AUTO").upper()
+    if c in ("AUTO", "", "WORLD"):
+        return max(2, int(round(world_long)))
+    try:
+        return max(64, int(c))
+    except (TypeError, ValueError):
+        return max(2, int(round(world_long)))
+
+
+def suggest_resolution_for_world(native_px: float, world_long: float, target_long: float) -> int:
+    """A section's AUTO longest edge as its angular SHARE of the target world map:
+    ``native * target/world`` (the section spans ``native/world`` of the globe, so at the
+    target density it wants that share of ``target_long``), snapped DOWN to a standard
+    size and floored at 512. Never exceeds the target itself."""
+    world_long = max(float(world_long), 1.0)
+    want = float(native_px) * (max(float(target_long), 1.0) / world_long)
+    chosen = STANDARD_RESOLUTIONS[0]
+    for r in STANDARD_RESOLUTIONS:
+        if r <= want:
+            chosen = r
+    return max(STANDARD_RESOLUTIONS[0], min(chosen, int(round(target_long))))
+
+
+def resolve_section_output(choice: str, native_px: float, world_long: float,
+                           target_choice: str) -> int:
+    """The concrete longest-edge px a section is exported / eroded at.
+
+    An explicit per-section Output Resolution always wins. On 'Auto' the size follows the
+    global World Map Resolution target: with a target set, the section gets its
+    proportional share of it (finer detail for a bigger deliverable); with the target on
+    'Auto' (world size) we keep the legacy balanced, responsive native-based size, so the
+    default is byte-for-byte unchanged."""
+    c = (choice or "AUTO").upper()
+    if c not in ("AUTO", "", "NATIVE"):
+        try:
+            return max(64, int(c))
+        except (TypeError, ValueError):
+            pass
+    tc = (target_choice or "AUTO").upper()
+    if tc in ("AUTO", "", "WORLD") or world_long <= 0:
+        return suggest_resolution(native_px)  # legacy default -- unchanged behaviour
+    return suggest_resolution_for_world(
+        native_px, world_long, resolve_world_resolution(target_choice, world_long))
 
 
 def scale_band_for_extent(extent_km: float) -> str:
@@ -226,6 +275,26 @@ def _minimum_filter(arr: np.ndarray, size: int) -> np.ndarray:
             for dx in range(-r, r + 1):
                 out = np.minimum(out, np.roll(np.roll(arr, dy, axis=0), dx, axis=1))
         return out
+
+
+def _box_mean(arr: np.ndarray, radius_px: float) -> np.ndarray:
+    """Mean over a ``(2r+1)`` square window, O(N) REGARDLESS of window size (so a wide inland
+    relief window stays cheap at 4K). scipy ``uniform_filter`` if present, else a summed-area
+    (integral-image) table. Edges use a shrinking window (clamped), not zero-padding."""
+    r = max(int(round(radius_px)), 1)
+    a = np.asarray(arr, dtype=np.float64)
+    try:
+        from scipy.ndimage import uniform_filter
+        return uniform_filter(a, size=2 * r + 1, mode="nearest")
+    except Exception:
+        H, W = a.shape
+        ii = np.zeros((H + 1, W + 1), dtype=np.float64)
+        ii[1:, 1:] = np.cumsum(np.cumsum(a, axis=0), axis=1)
+        y0 = np.clip(np.arange(H) - r, 0, H); y1 = np.clip(np.arange(H) + r + 1, 0, H)
+        x0 = np.clip(np.arange(W) - r, 0, W); x1 = np.clip(np.arange(W) + r + 1, 0, W)
+        s = (ii[np.ix_(y1, x1)] - ii[np.ix_(y0, x1)] - ii[np.ix_(y1, x0)] + ii[np.ix_(y0, x0)])
+        cnt = (y1 - y0)[:, None] * (x1 - x0)[None, :]
+        return s / np.maximum(cnt, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +444,18 @@ def _new_grid(seed_m: np.ndarray, cell_m: float,
 # LEM: stream-power + diffusion landscape evolution (carves crisp drainage)
 # ---------------------------------------------------------------------------
 
+def _stretch01(a: np.ndarray, land: Optional[np.ndarray] = None) -> np.ndarray:
+    """Robustly rescale an array to [0,1] using p2..p98 of its LAND values (so a
+    spatial-driver crop spans the full knob range regardless of absolute brightness)."""
+    a = np.asarray(a, dtype=np.float64)
+    vals = a[land] if (land is not None and np.any(land)) else a.ravel()
+    lo = float(np.percentile(vals, 2))
+    hi = float(np.percentile(vals, 98))
+    if hi - lo < 1e-9:
+        return np.full_like(a, 0.5)
+    return np.clip((a - lo) / (hi - lo), 0.0, 1.0)
+
+
 def lem_erode(
     height_m: np.ndarray,
     cell_m: float,
@@ -390,6 +471,15 @@ def lem_erode(
     flow_metric: str = "D8",
     sea_mask: Optional[np.ndarray] = None,
     sea_level: float = 0.0,
+    k_field: Optional[np.ndarray] = None,
+    uplift_field: Optional[np.ndarray] = None,
+    enable_deposition: bool = False,
+    depo_v_s: float = 1.0,
+    depo_k_sed: Optional[float] = None,
+    depo_k_br: Optional[float] = None,
+    depo_h_star_m: float = 1.0,
+    depo_phi: float = 0.3,
+    depo_f_f: float = 0.0,
 ) -> Tuple[np.ndarray, np.ndarray, Dict]:
     """Evolve ``height_m`` under stream-power incision + linear hillslope diffusion.
 
@@ -398,6 +488,11 @@ def lem_erode(
     rainfall field the discharge ``Q = R*A`` drives ``E = K Q^m S^n`` (climate-driven incision).
     ``sea_mask`` (cells at/below ``sea_level``) pins the ocean as a fixed base-level outlet so the
     land erodes toward the coast without the sea uplifting or the coastline being reworked.
+
+    ``k_field`` (spatial erodibility) and ``uplift_field`` (spatial uplift) are optional per-cell
+    arrays (same 2-D shape as ``height_m``); when given they REPLACE the scalar ``k_sp`` / ``uplift``
+    so softer rock erodes faster and orogenic belts uplift more. ``None`` => the scalar (unchanged
+    behaviour).
     """
     from landlab.components import FastscapeEroder, LinearDiffuser
 
@@ -409,20 +504,113 @@ def lem_erode(
 
     g, z = _new_grid(seed, cell_m, sea_mask=sea_mask, sea_level=sea_level)
     router, router_name = _make_router(g, runoff, flow_metric=flow_metric)
-    sp = FastscapeEroder(g, K_sp=k_sp, m_sp=m_sp, n_sp=n_sp,
-                         discharge_field="surface_water__discharge")
+
+    # Spatial erodibility: FastscapeEroder accepts a per-node K array. Register it as a
+    # grid field (the portable form across landlab versions) and pass by name.
+    if k_field is not None:
+        k_arr = np.asarray(k_field, dtype=np.float64).ravel()
+        if k_arr.size != z.size:
+            raise ValueError(f"k_field size {k_arr.size} != node count {z.size}")
+        if "K_sp_field" in g.at_node:
+            g.at_node["K_sp_field"][:] = k_arr
+        else:
+            g.add_field("K_sp_field", k_arr, at="node")
+        k_arg = g.at_node["K_sp_field"]
+    else:
+        k_arg = k_sp
     ld = LinearDiffuser(g, linear_diffusivity=diffusivity)
     core = g.core_nodes
 
-    t0 = time.perf_counter()
-    for _ in range(int(steps)):
-        z[core] += uplift * dt
-        router.run_one_step()
-        sp.run_one_step(dt)
-        ld.run_one_step(dt)
-    secs = time.perf_counter() - t0
+    # Spatial uplift: per-node uplift rate applied to core nodes each step.
+    u_arr = None
+    if uplift_field is not None:
+        u_arr = np.asarray(uplift_field, dtype=np.float64).ravel()
+        if u_arr.size != z.size:
+            raise ValueError(f"uplift_field size {u_arr.size} != node count {z.size}")
 
-    info = {"router": router_name, "secs": round(secs, 2), "steps": int(steps)}
+    sed_mean = sed_max = None
+    if enable_deposition:
+        # Transport-limited fluvial erosion + DEPOSITION (SPACE): tracks a sediment layer over
+        # bedrock and lays alluvium down where transport capacity drops -- valley floors,
+        # lowlands, and approaching base level -- so the section grows flat depositional land
+        # instead of incising canyons everywhere. ``depo_v_s`` (settling velocity) is the main
+        # deposition lever; ``K_sed``/``K_br`` default to the stream-power ``k_sp``/``k_field``.
+        from landlab.components import SpaceLargeScaleEroder
+        if "soil__depth" not in g.at_node:
+            g.add_zeros("soil__depth", at="node")
+        if "bedrock__elevation" not in g.at_node:
+            g.add_zeros("bedrock__elevation", at="node")
+        soil = g.at_node["soil__depth"]
+        bedrock = g.at_node["bedrock__elevation"]
+        soil[:] = 0.0
+        bedrock[:] = z - soil  # bedrock + soil == topographic, the invariant SPACE maintains
+        space = SpaceLargeScaleEroder(
+            g, K_sed=(k_arg if depo_k_sed is None else depo_k_sed),
+            K_br=(k_arg if depo_k_br is None else depo_k_br),
+            F_f=float(depo_f_f), phi=float(depo_phi), H_star=float(depo_h_star_m),
+            v_s=float(depo_v_s), m_sp=m_sp, n_sp=n_sp,
+            discharge_field="surface_water__discharge",
+        )
+        # SPACE is an EXPLICIT scheme: unlike the implicit FastscapeEroder it has a CFL limit, and
+        # at Project-R's dt + large discharges the bedrock-incision term overshoots into spurious
+        # deep pits and giant sediment mounds. Sub-step each year-step on a CFL estimate of the
+        # incision-wave speed (K Q^m S^{n-1}); re-route flow periodically so it follows the
+        # evolving surface. ``kmax`` bounds the rate when K is a spatial field.
+        #
+        # CFL_COURANT (sub-step size) and REROUTE_EVERY (how often, in sub-steps, to re-route)
+        # were tuned for speed-vs-stability: re-routing EVERY sub-step at courant 0.2 is correct
+        # but ~3x slower than needed. courant 0.3 + re-route every 2nd sub-step gives the SAME
+        # result (validated stable + near-identical output on coast-lowland, massif, and
+        # cliff-coast cases) at ~2.5x the speed. Re-routing NEVER (or courant too high) blows up.
+        CFL_COURANT = 0.3
+        REROUTE_EVERY = 2
+        disch = g.at_node["surface_water__discharge"]
+        slope = g.at_node["topographic__steepest_slope"]
+        kmax = float(np.max(k_arg)) if isinstance(k_arg, np.ndarray) else float(k_arg)
+        sub_max = 1
+        t0 = time.perf_counter()
+        for _ in range(int(steps)):
+            bedrock[core] += (u_arr[core] if u_arr is not None else uplift) * dt
+            z[:] = bedrock + soil
+            router.run_one_step()
+            rate = kmax * np.power(np.maximum(disch, 0.0), m_sp) \
+                * np.power(np.maximum(slope, 1e-6), max(n_sp - 1.0, 0.0))
+            rmax = float(rate.max()) if rate.size else 0.0
+            nsub = int(np.clip(np.ceil(dt / (CFL_COURANT * cell_m / rmax)) if rmax > 0.0 else 1, 1, 64))
+            sub_max = max(sub_max, nsub)
+            sub_dt = dt / nsub
+            for k in range(nsub):
+                if k > 0 and (k % REROUTE_EVERY == 0):
+                    router.run_one_step()
+                space.run_one_step(sub_dt)
+            ld.run_one_step(dt)
+            # Hillslope creep changed the SURFACE; split it back into bedrock + soil for the next
+            # SPACE step. Where creep cut below the (exhausted) regolith, lower BEDROCK too so
+            # bedrock-cored ridges still round off; elsewhere the change lands in the sediment
+            # layer. ``z`` stays the authoritative surface, so soil/bedrock/topo stay consistent.
+            np.minimum(bedrock, z, out=bedrock)
+            soil[:] = z - bedrock
+        secs = time.perf_counter() - t0
+        sed_mean = round(float(soil[core].mean()), 3)
+        sed_max = round(float(soil[core].max()), 1)
+    else:
+        sp = FastscapeEroder(g, K_sp=k_arg, m_sp=m_sp, n_sp=n_sp,
+                             discharge_field="surface_water__discharge")
+        t0 = time.perf_counter()
+        for _ in range(int(steps)):
+            z[core] += (u_arr[core] if u_arr is not None else uplift) * dt
+            router.run_one_step()
+            sp.run_one_step(dt)
+            ld.run_one_step(dt)
+        secs = time.perf_counter() - t0
+
+    info = {"router": router_name, "secs": round(secs, 2), "steps": int(steps),
+            "spatial_k": k_field is not None, "spatial_uplift": uplift_field is not None,
+            "deposition": bool(enable_deposition)}
+    if enable_deposition:
+        info["sed_mean_m"] = sed_mean
+        info["sed_max_m"] = sed_max
+        info["sub_steps_max"] = sub_max
     out = z.reshape(seed.shape).astype(np.float32)
     dr = g.at_node["drainage_area"].reshape(seed.shape).astype(np.float32)
     return out, dr, info
@@ -646,6 +834,323 @@ def wave_exposure(
         neigh = _shift_fill0(F, -dy, -dx)  # fetch of the seaward neighbour, read at c
         expo += (w / wmean) * neigh * step_m
     return expo
+
+
+# ---------------------------------------------------------------------------
+# Glacial erosion (Hergarten stream-power law) -> U-troughs, over-deepening, fjords
+# ---------------------------------------------------------------------------
+
+def glacial_erode(
+    height_m: np.ndarray,
+    cell_m: float,
+    *,
+    ela_m: float,
+    full_glac_m: Optional[float] = None,
+    precip: Optional[np.ndarray] = None,
+    ice_frac: float = 0.1,
+    ablation: float = 4.0,
+    k_g: float = 1.9e-5,
+    m_g: float = 0.5,
+    n_g: float = 1.0,
+    alpha: float = 0.30,
+    psi: float = 3.0,
+    h_scale: float = 0.4,
+    quarry_mult: float = 1.0,
+    quarry_step_m: float = 30.0,
+    diffuse: float = 0.3,
+    max_incise_m: float = 30.0,
+    flux_min: float = 0.0,
+    dt: float = 2000.0,
+    steps: int = 120,
+    reroute_every: int = 4,
+    snout_clamp: bool = True,
+    flow_metric: str = "D8",
+    sea_mask: Optional[np.ndarray] = None,
+    sea_level: float = 0.0,
+) -> Tuple[np.ndarray, np.ndarray, Dict]:
+    """Glacial stream-power erosion (Hergarten 2021 ESurf / 2023 GMD) -> over-deepened
+    U-troughs and fjords. Pure (no bpy).
+
+    Returns ``(z_bedrock, ice, info)``. The heightmap ``z_bedrock`` is the eroded BEDROCK
+    only -- ice is never added to it, so it carries the erosion effects alone. ``ice`` is a
+    dict of separate fields the caller can save/overlay independently (e.g. add the ice in
+    Gaea2): ``thickness`` (metres of ice), ``surface`` (bedrock + ice = ice-surface
+    elevation), ``mask`` (glaciated extent, bool), ``flux`` (the ice flux A_i).
+
+    Law (Hergarten eq. 19, exponents identical to fluvial):
+
+        E = K_g * A_i^m * S^n          m = 0.5, n = 1
+
+    Three things make it glacial rather than fluvial, and each one is load-bearing:
+
+    - **A_i is ICE flux, not water discharge.** Per-node ice production
+      ``p_i = ice_frac * precip * clip((z - H_e)/(H_f - H_e), -ablation, 1)`` (H_e = ELA,
+      H_f = full-glaciation altitude) is accumulated down-flow and clamped at 0 along the
+      flow stack, so the glacier terminates at its snout. Flux peaks in the trunk near the
+      coast -- which is exactly where fjords cut deepest.
+
+    - **S is the slope of the ICE SURFACE, not the bed.** Ice thickness follows the
+      paper-faithful closure ``h ~ A_i^((1-alpha)/psi) / S_bed`` (alpha=0.30, psi=3 ->
+      exponent ~0.233). The smooth ice surface keeps sloping downflow even over a reverse-
+      sloped bed, so erosion continues INTO closed over-deepenings and carves BELOW sea
+      level -> fjords once flooded. (Pure bed-slope stream power is base-level limited and
+      cannot do this, which is why this carves explicitly instead of via FastscapeEroder.)
+
+    - **A quarrying term is added** (keyed to bed-riser height): abrasion alone under-cuts
+      real fjords; quarrying of bedrock steps does the deepening.
+
+    ``K_g`` (= 19 Ma^-1 in the GMD calibration) and ``h_scale`` are the two knobs to
+    calibrate to your units/relief -- ``h_scale`` so trunk ice lands in the 100s of metres,
+    ``K_g`` linearly to a target trough depth (``info['overdeepening_m']``). Concavity should
+    land at the glacial ``theta_g ~= 0.47``, scorable with the existing slope-area metric.
+    """
+    z = np.asarray(height_m, dtype=np.float64).copy()
+    H, W = z.shape
+    H_f = float(full_glac_m) if full_glac_m is not None else float(ela_m) + 500.0
+    denom = max(H_f - float(ela_m), 1.0)
+    p = (np.ones_like(z) if precip is None
+         else np.asarray(precip, dtype=np.float64).reshape(z.shape))
+    sea = (np.zeros_like(z, dtype=bool) if sea_mask is None
+           else np.asarray(sea_mask, dtype=bool).reshape(z.shape))
+    cell_area = float(cell_m) ** 2
+    s_min = 1e-4
+    h_exp = (1.0 - float(alpha)) / float(psi)   # paper-faithful thickness exponent (~0.233)
+
+    has_sea = bool(sea.any()) and not bool(sea.all())
+    g, zg = _new_grid(z, cell_m, sea_mask=(sea if has_sea else None), sea_level=sea_level)
+    router, rname = _make_router(g, np.ones(z.size, dtype=np.float64), flow_metric=flow_metric)
+    sea_flat = sea.ravel()
+    rec = stack = None
+
+    def _route(bed):
+        """Route ice over ``bed``; (re)populate the receiver + flow-stack node arrays."""
+        nonlocal rec, stack
+        zg[:] = bed.ravel()
+        if has_sea:
+            zg[sea_flat] = float(sea_level)     # ocean = flat base-level outlet for ice
+        router.run_one_step()                   # fills pits FOR ROUTING ONLY; the bed keeps them
+        rec = np.asarray(g.at_node["flow__receiver_node"])
+        stack = np.asarray(g.at_node["flow__upstream_node_order"])
+
+    def _ice_flux(bed):
+        """ELA-gated ice production accumulated down-flow, clamped at 0 (glacier snout)."""
+        prod = (ice_frac * p.ravel()
+                * np.clip((bed.ravel() - float(ela_m)) / denom, -float(ablation), 1.0) * cell_area)
+        if snout_clamp:
+            for nd in stack[::-1]:              # upstream -> downstream (stack is d/s -> u/s)
+                v = prod[nd]
+                if v < 0.0:
+                    v = prod[nd] = 0.0          # ablation can't yield negative ice
+                r = rec[nd]
+                if r != nd:
+                    prod[r] += v
+        else:
+            np.maximum(prod, 0.0, out=prod)
+            for nd in stack[::-1]:
+                r = rec[nd]
+                if r != nd:
+                    prod[r] += prod[nd]
+        return np.maximum(prod, 0.0).reshape(H, W)
+
+    def _thickness(A_i, bed):
+        """Ice thickness from the closure h ~ A_i^h_exp / S_bed. The slope is floored
+        (~0.5deg) so the flat floors the glacier itself carves don't blow up h; the result is
+        smoothed because the ice SURFACE is smooth (that smoothness is what carves fjords)."""
+        S_bed = np.maximum(d8_slope(bed, cell_m), 0.01)
+        h = np.where(A_i > float(flux_min), h_scale * np.power(A_i, h_exp) / S_bed, 0.0)
+        return _gaussian_blur(h, sigma=2.0)
+
+    t0 = time.perf_counter()
+    for it in range(int(steps)):
+        if it % max(int(reroute_every), 1) == 0:
+            _route(z)
+        A_i = _ice_flux(z)
+        glac = A_i > float(flux_min)
+
+        # ICE-SURFACE slope is the fjord-making term: the smooth ice surface keeps sloping
+        # over a reverse-sloped bed, so erosion cuts BELOW base level into over-deepenings.
+        h_ice = _thickness(A_i, z)
+        S_srf = np.maximum(d8_slope(z + h_ice, cell_m), s_min)
+
+        # Abrasion (Hergarten stream power) + quarrying of bed risers. EXPLICIT subtraction
+        # (not FastscapeEroder) so it can excavate closed over-deepenings below base level.
+        abrasion = k_g * np.power(A_i, m_g) * np.power(S_srf, n_g)
+        riser = z - _minimum_filter(z, size=3)
+        quarry = (k_g * quarry_mult * np.power(A_i, m_g)
+                  * np.clip(riser / max(quarry_step_m, 1e-6), 0.0, None))
+        dz = np.minimum((abrasion + quarry) * dt, max_incise_m)
+        z = z - np.where(glac & ~sea, dz, 0.0)      # BEDROCK only -- ice is never added here
+
+        # Lateral smoothing under thick ice -> U-shaped (not V-shaped) cross-section.
+        if diffuse > 0.0 and glac.any():
+            ref = float(np.percentile(h_ice[glac], 90)) + 1e-6
+            wt = np.clip(diffuse * (h_ice / ref), 0.0, 0.7)
+            z = np.where(glac & ~sea, (1.0 - wt) * z + wt * _gaussian_blur(z, sigma=1.0), z)
+
+    # Final ice state CONSISTENT with the returned (eroded) bed, so the separate ice
+    # outputs line up exactly with the bedrock heightmap.
+    _route(z)
+    A_i = _ice_flux(z)
+    h_ice = _thickness(A_i, z)
+    glac = A_i > float(flux_min)
+    secs = time.perf_counter() - t0
+
+    below = (z < float(sea_level)) & ~sea
+    info = dict(
+        router=rname, secs=round(secs, 2), steps=int(steps),
+        glaciated_frac=round(float(glac.mean()), 3),
+        overdeepening_m=round(float((float(sea_level) - z[below]).max()), 1) if below.any() else 0.0,
+        ela_m=round(float(ela_m), 1), h_max_m=round(float(h_ice.max()), 1),
+    )
+    ice = dict(
+        thickness=h_ice.astype(np.float32),         # metres of ice (the separate ice layer)
+        surface=(z + h_ice).astype(np.float32),     # bedrock + ice = ice-surface elevation
+        mask=glac,                                  # glaciated extent (bool)
+        flux=A_i.astype(np.float32),                # ice flux A_i
+    )
+    return z.astype(np.float32), ice, info
+
+
+# ---------------------------------------------------------------------------
+# Sea floor / bathymetry -> continental shelf, slope, abyssal plain (+ keeps fjords)
+# ---------------------------------------------------------------------------
+
+def _coast_distance(sea_mask: np.ndarray, land_elev: np.ndarray, cell_m: float,
+                    max_iter: int = 600) -> Tuple[np.ndarray, np.ndarray]:
+    """For every cell, distance (m) to the nearest LAND cell and that land cell's elevation.
+
+    scipy's exact EDT (with feature indices) when available; otherwise a capped iterative
+    8-neighbour expansion (good enough for previews -- the bathymetry profile is smooth in
+    distance anyway). ``land_elev`` supplies the elevation carried out from each coast."""
+    try:
+        from scipy.ndimage import distance_transform_edt
+        dist_px, (iy, ix) = distance_transform_edt(
+            sea_mask, return_distances=True, return_indices=True)
+        lev_near = land_elev[iy, ix]
+        return (dist_px * float(cell_m)).astype(np.float64), lev_near.astype(np.float64)
+    except Exception:
+        H, W = sea_mask.shape
+        INF = np.float64(max_iter + 2)
+        dist = np.where(sea_mask, INF, 0.0).astype(np.float64)      # in CELLS for the chamfer
+        lev = np.where(sea_mask, 0.0, land_elev).astype(np.float64)
+        d1, d2 = 1.0, np.sqrt(2.0)
+        offs = [(-1, -1, d2), (-1, 0, d1), (-1, 1, d2), (0, -1, d1),
+                (0, 1, d1), (1, -1, d2), (1, 0, d1), (1, 1, d2)]
+        for _ in range(int(max_iter)):
+            changed = False
+            for dy, dx, w in offs:
+                cand = np.roll(np.roll(dist, dy, axis=0), dx, axis=1) + w
+                src = np.roll(np.roll(lev, dy, axis=0), dx, axis=1)
+                better = cand < dist
+                if better.any():
+                    dist = np.where(better, cand, dist)
+                    lev = np.where(better, src, lev)
+                    changed = True
+            if not changed:
+                break
+        dist = np.where(np.isfinite(dist), dist, INF)
+        return dist * float(cell_m), lev
+
+
+def seafloor_bathymetry(
+    height_m: np.ndarray,
+    cell_m: float,
+    *,
+    sea_level: float = 0.0,
+    shelf_depth_m: float = 130.0,
+    shelf_width_km: float = 60.0,
+    shelf_relief_mod: float = 0.7,
+    relief_window_km: float = 15.0,
+    slope_width_km: float = 40.0,
+    floor_depth_m: float = 6000.0,
+    relief_ref_m: Optional[float] = None,
+    input_depth: Optional[np.ndarray] = None,
+    input_weight: float = 1.0,
+    smooth: float = 1.0,
+) -> Tuple[np.ndarray, Dict]:
+    """Fill the ocean (cells <= ``sea_level``) with a realistic continental margin and return
+    ``(z, info)``. Pure (no bpy). Land is untouched; only sea cells are rewritten.
+
+    Profile vs distance from the coast (metres):
+
+    - **Continental shelf** -- a gentle CONCAVE ``depth = shelf_depth * (d / shelf_w)^(2/3)``
+      (Dean's equilibrium form) from 0 at the shoreline to ``shelf_depth_m`` at the shelf break.
+    - **Continental slope** -- a steeper smootherstep drop from ``shelf_depth_m`` to
+      ``floor_depth_m`` across ``slope_width_km``.
+    - **Abyssal plain** -- the flat ``floor_depth_m`` beyond.
+
+    The shelf WIDTH is narrowed where the bordering land is high/steep (active-margin look:
+    mountains plunge into deep water) and stays broad off lowlands (passive margin), driven by
+    the nearest coast's elevation relative to ``relief_ref_m`` (default = p98 of land relief).
+
+    Crucially the result is unioned (deeper-of) with whatever was already carved below sea level
+    -- so the **glacial fjords keep their over-deepening**, appearing as deep troughs incised into
+    the shelf (with the shallow sill the glacial snout-taper already left at the mouth).
+
+    ``floor_depth_m`` should equal the WORLD ocean-floor depth used for the export datum, so the
+    deepest brightness (0) is consistent across sections. An optional ``input_depth`` (a [0..1]
+    crop) supplies a hand-painted / real bathymetry, blended in by ``input_weight`` and still
+    unioned with the carve."""
+    z = np.asarray(height_m, dtype=np.float64).copy()
+    H, W = z.shape
+    sea = z <= float(sea_level)
+    land = ~sea
+    if not sea.any():
+        return z.astype(np.float32), dict(ocean_frac=0.0, deepest_m=0.0, note="no ocean")
+
+    # "Hinterland relief": the average LAND height in a window inland (ocean excluded), so the
+    # shelf width responds to the MOUNTAINS BEHIND the coast -- not the waterline cell, which is
+    # ~sea level by definition. Carried out to each ocean cell via its nearest coast (EDT).
+    radius_px = max(float(relief_window_km) * 1000.0 / float(cell_m), 1.0)
+    wsum = _box_mean(land.astype(np.float64), radius_px)        # fraction of the window that is land
+    hsum = _box_mean(np.where(land, z, 0.0), radius_px)         # mean land-height contribution
+    hinterland = np.where(wsum > 1e-6, hsum / np.maximum(wsum, 1e-9), float(sea_level))
+    dist_m, lev_near = _coast_distance(sea, hinterland, cell_m)
+
+    # Shelf width modulated by that hinterland height (mountainous coast -> narrow shelf).
+    if relief_ref_m is not None:
+        relief_ref = max(float(relief_ref_m), 1.0)
+    else:
+        relief_ref = max(float(np.percentile(hinterland[land], 95)) - float(sea_level), 1.0) if land.any() else 1.0
+    relief_norm = np.clip((lev_near - float(sea_level)) / relief_ref, 0.0, 1.0)
+    base_w = float(shelf_width_km) * 1000.0
+    shelf_w = np.maximum(base_w * (1.0 - float(shelf_relief_mod) * relief_norm), base_w * 0.15)
+    slope_w = max(float(slope_width_km) * 1000.0, float(cell_m))
+
+    # Piecewise depth(distance): concave shelf -> smootherstep slope -> flat abyssal floor.
+    frac = np.clip(dist_m / np.maximum(shelf_w, float(cell_m)), 0.0, 1.0)
+    depth = float(shelf_depth_m) * np.power(frac, 2.0 / 3.0)
+    in_slope = dist_m > shelf_w
+    t = np.clip((dist_m - shelf_w) / slope_w, 0.0, 1.0)
+    smoothstep = t * t * (3.0 - 2.0 * t)
+    depth = np.where(in_slope, float(shelf_depth_m)
+                     + (float(floor_depth_m) - float(shelf_depth_m)) * smoothstep, depth)
+
+    # Optional direct bathymetry input (a [0..1] depth crop) blended over the procedural floor.
+    if input_depth is not None:
+        d_in = np.clip(np.asarray(input_depth, dtype=np.float64).reshape(z.shape), 0.0, 1.0) * float(floor_depth_m)
+        w = float(np.clip(input_weight, 0.0, 1.0))
+        depth = (1.0 - w) * depth + w * d_in
+
+    z_bathy = float(sea_level) - depth
+    z_union = np.minimum(z_bathy, z)            # keep the DEEPER of shelf vs existing carve (fjords)
+
+    out = z.copy()
+    out[sea] = z_union[sea]
+    if smooth > 0.0:
+        # Blur ocean toward sea_level at the edge (natural shoaling) without bleeding land heights in.
+        tmp = np.where(sea, out, float(sea_level))
+        out = np.where(sea, _gaussian_blur(tmp, sigma=float(smooth)), out)
+
+    deepest = float(float(sea_level) - out[sea].min())
+    info = dict(
+        ocean_frac=round(float(sea.mean()), 3),
+        deepest_m=round(deepest, 1),
+        shelf_depth_m=round(float(shelf_depth_m), 1),
+        floor_depth_m=round(float(floor_depth_m), 1),
+        shelf_w_km=[round(float(shelf_w.min()) / 1000.0, 1), round(float(shelf_w.max()) / 1000.0, 1)],
+    )
+    return out.astype(np.float32), info
 
 
 def coastal_erode(
@@ -872,6 +1377,10 @@ def run_erosion(
     climate_kind: str = "uniform",
     climate_strength: float = 1.0,
     rainfall: Optional[np.ndarray] = None,
+    erodibility_norm: Optional[np.ndarray] = None,
+    erodibility_contrast: float = 1.0,
+    uplift_norm: Optional[np.ndarray] = None,
+    uplift_influence: float = 0.0,
     k_sp: float = 3e-5,
     m_sp: float = 0.5,
     n_sp: float = 1.0,
@@ -888,6 +1397,14 @@ def run_erosion(
     sea_level_m: float = 0.0,
     flow_metric: str = "D8",
     overlay_flow_metric: str = "Quinn",
+    enable_glacial: bool = False,
+    glacial_ela_m: Optional[float] = None,
+    glacial_full_glac_m: Optional[float] = None,
+    glacial_k_g: float = 1.9e-5,
+    glacial_quarry_mult: float = 1.0,
+    glacial_diffuse: float = 0.3,
+    glacial_steps: int = 120,
+    glacial_ice_out: Optional[Dict] = None,
     enable_coastal: bool = False,
     coastal_steps: int = 25,
     coastal_rate_m: float = 3.0,
@@ -897,18 +1414,43 @@ def run_erosion(
     coastal_swell_focus: float = 0.0,
     coastal_talus_deg: float = 0.0,
     coastal_deposition: bool = True,
+    enable_deposition: bool = False,
+    depo_v_s: float = 1.0,
 ) -> Tuple[np.ndarray, Dict]:
     """Full per-section pipeline: (optional coastal wave reworking) -> condition seed -> rainfall
     -> LEM -> (optional light Wilbur overlay) -> linear peak rescale. Returns
     ``(eroded_metres, metrics_dict)``. Pure: callable from the Blender operator and from a
     headless validation harness alike.
 
-    The coastal pass (when ``enable_coastal``) runs FIRST and reshapes the baseline surface, so
-    everything downstream -- ``sea_mask``, seed conditioning, the ocean restore -- sees the
-    reworked coast. The operator applies the same pass to its blend baseline (see erode_ops), so
-    coastline changes survive the strength blend instead of being restored away.
+    When ``enable_glacial``, a glacial carve runs EVEN BEFORE the coastal pass: it over-deepens
+    U-troughs below sea level so the coast/coastal pass and LEM all see fjords. The coastal pass
+    (when ``enable_coastal``) then reshapes the baseline, so everything downstream -- ``sea_mask``,
+    seed conditioning, the ocean restore -- sees the reworked coast. The operator must apply the
+    SAME glacial+coastal passes to its blend baseline (see erode_ops), or the ocean restore /
+    strength blend silently undoes the structural coastline changes.
     """
     height_m = np.asarray(height_m, dtype=np.float32)
+
+    glacial_info = None
+    if enable_glacial:
+        glac_sea = height_m <= float(sea_level_m)
+        glac_land = ~glac_sea
+        if glacial_ela_m is None:
+            hi = float(np.percentile(height_m[glac_land], 98)) if glac_land.any() else float(height_m.max())
+            ela = float(sea_level_m) + 0.35 * (hi - float(sea_level_m))   # default ELA: 35% up the relief
+        else:
+            ela = float(glacial_ela_m)
+        height_m, _glac_ice, glacial_info = glacial_erode(
+            height_m, cell_m, ela_m=ela, full_glac_m=glacial_full_glac_m,
+            k_g=glacial_k_g, quarry_mult=glacial_quarry_mult, diffuse=glacial_diffuse,
+            steps=glacial_steps, flow_metric=flow_metric,
+            sea_mask=glac_sea if (glac_sea.any() and not glac_sea.all()) else None,
+            sea_level=float(sea_level_m),
+        )
+        # The heightmap (height_m) carries on as eroded BEDROCK only; the ice is handed back
+        # separately via glacial_ice_out so the operator can save it as its own layer.
+        if glacial_ice_out is not None:
+            glacial_ice_out.update(_glac_ice)
 
     coastal_info = None
     if enable_coastal:
@@ -955,10 +1497,29 @@ def run_erosion(
     else:
         rain_field = None
 
+    # --- Optional spatial drivers (normalized [0,1] crops) -> per-cell K / U fields ---
+    # Both are stretched to [0,1] over LAND (robust p2..p98) so the knob ranges behave
+    # regardless of the map's absolute brightness; ocean cells don't evolve so their
+    # values are irrelevant.
+    land_for_norm = ~sea_mask
+    k_field = None
+    if erodibility_norm is not None and float(erodibility_contrast) > 1.0001:
+        en = _stretch01(np.asarray(erodibility_norm, dtype=np.float64).reshape(height_m.shape), land_for_norm)
+        c = float(erodibility_contrast)
+        # norm 0.5 -> Kx1 (neutral); 1 -> Kxc (softest, erodes faster); 0 -> K/c (hardest).
+        k_field = (float(k_sp) * np.power(c, 2.0 * en - 1.0)).astype(np.float64)
+    uplift_field = None
+    if uplift_norm is not None and float(uplift_influence) > 1e-6:
+        un = _stretch01(np.asarray(uplift_norm, dtype=np.float64).reshape(height_m.shape), land_for_norm)
+        infl = float(np.clip(uplift_influence, 0.0, 1.0))
+        uplift_field = (float(uplift) * ((1.0 - infl) + infl * un)).astype(np.float64)
+
     z, dr, lem_info = lem_erode(
         seed, cell_m, rainfall=rain_field, k_sp=k_sp, m_sp=m_sp, n_sp=n_sp,
         diffusivity=diffusivity, uplift=uplift, dt=dt, steps=steps, flow_metric=flow_metric,
         sea_mask=sea_mask if has_sea else None, sea_level=float(sea_level_m),
+        k_field=k_field, uplift_field=uplift_field,
+        enable_deposition=enable_deposition, depo_v_s=depo_v_s,
     )
 
     overlay_secs = None
@@ -987,9 +1548,16 @@ def run_erosion(
     metrics.update(
         router=lem_info.get("router"),
         lem_secs=lem_info.get("secs"),
+        deposition=lem_info.get("deposition"),
+        sed_mean_m=lem_info.get("sed_mean_m"),
+        sed_max_m=lem_info.get("sed_max_m"),
+        depo_sub_steps_max=lem_info.get("sub_steps_max"),
         overlay_secs=round(overlay_secs, 2) if overlay_secs is not None else None,
         coastal_secs=coastal_info.get("secs") if coastal_info else None,
         coastal_conserved_frac=coastal_info.get("conserved_frac") if coastal_info else None,
+        glacial_secs=glacial_info.get("secs") if glacial_info else None,
+        glacial_overdeepening_m=glacial_info.get("overdeepening_m") if glacial_info else None,
+        glacial_glaciated_frac=glacial_info.get("glaciated_frac") if glacial_info else None,
         cell_m=round(float(cell_m), 2),
     )
     return z.astype(np.float32), metrics

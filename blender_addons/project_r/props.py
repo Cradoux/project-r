@@ -290,6 +290,16 @@ class ProjectionPastaProjectSettings(PropertyGroup):
         min=1.0,
         soft_max=20000.0,
     )
+    ocean_floor_depth_m: FloatProperty(  # type: ignore[valid-type]
+        name="Ocean Floor Depth (m)",
+        description="Depth of the deepest ocean floor below sea level, WORLD-WIDE (pure black in the "
+                    "Gaea sea-floor export). With Max Elevation it sets the single elevation range every "
+                    "section is encoded against, so sea level lands at the SAME brightness in every "
+                    "section (otherwise sections show colour seams in Gaea). ~6000 m is a deep abyssal plain",
+        default=6000.0,
+        min=0.0,
+        soft_max=11000.0,
+    )
 
     normalize_heightmaps: BoolProperty(  # type: ignore[valid-type]
         name="Normalize Heights",
@@ -297,16 +307,38 @@ class ProjectionPastaProjectSettings(PropertyGroup):
         default=True,
     )
 
+    # Target FINAL world-map resolution (longest edge). ONE global quality knob, set at
+    # the top alongside radius: it drives BOTH the reassembled map size AND every section's
+    # 'Auto' output/erosion detail (each section gets its angular share of this target).
+    # 'Auto' = keep the loaded world map's size -> sections stay at the legacy balanced,
+    # responsive detail, so the default is unchanged.
+    target_world_resolution: EnumProperty(  # type: ignore[valid-type]
+        name="World Map Resolution",
+        description="Longest-edge pixel size of the FINAL reassembled world map. This one knob "
+                    "drives reassembly AND every 'Auto' Output Resolution: each section is "
+                    "exported/eroded at its share of this target. 'Auto' keeps the loaded world "
+                    "map's size (sections keep a balanced, responsive Auto detail); a larger "
+                    "target makes sections + erosion scale up (finer, but slower)",
+        items=[
+            ("AUTO", "Auto (world size)", "Use the loaded world map's resolution; sections keep the legacy balanced Auto detail"),
+            ("4096", "4096 px", "Final world map 4096 px on its long edge"),
+            ("8192", "8192 px", "8192 px (sections scale up to match; slower erosion)"),
+            ("16384", "16384 px", "16384 px (much finer; sections + erosion get large)"),
+        ],
+        default="AUTO",
+    )
+
     # Target output resolution (longest edge) for processed section maps + the
-    # in-Blender erosion detail, and the reassembled global map. One quality knob.
+    # in-Blender erosion detail. Per-SECTION override; 'Auto' follows the global
+    # World Map Resolution target above.
     output_resolution: EnumProperty(  # type: ignore[valid-type]
         name="Output Resolution",
-        description="Per-SECTION longest-edge pixel size: the exported section crops and the "
-                    "in-Blender erosion detail. 'Auto' picks a balanced size for the section; "
-                    "higher = finer detail, but erosion time scales ~linearly with pixel count. "
-                    "(The reassembled global map size is set separately under Reassembly.)",
+        description="Per-SECTION longest-edge pixel size: the exported section crop and the "
+                    "in-Blender erosion detail. 'Auto' follows the World Map Resolution set at the "
+                    "top (this section's share of it); higher = finer detail, but erosion time "
+                    "scales ~linearly with pixel count. Pick an explicit size to override the target",
         items=[
-            ("AUTO", "Auto (optimal)", "A balanced size derived from the section's native resolution"),
+            ("AUTO", "Auto (from World Map Res)", "This section's share of the World Map Resolution target set at the top"),
             ("512", "512 px", "512 px longest edge"),
             ("1024", "1024 px", "1024 px longest edge"),
             ("2048", "2048 px", "2048 px longest edge (slow erosion)"),
@@ -316,13 +348,12 @@ class ProjectionPastaProjectSettings(PropertyGroup):
         default="AUTO",
     )
 
-    # Final reassembled global map size -- a GLOBAL (world-scale) resolution, kept
-    # separate from the per-section output_resolution so a per-section detail choice
-    # can never silently shrink the world deliverable.
+    # DEPRECATED: superseded by target_world_resolution (the top-level World Map
+    # Resolution now drives reassembly). Kept registered so old .blend files still load;
+    # no longer shown in the UI or read by the reassemble operator.
     reassembly_resolution: EnumProperty(  # type: ignore[valid-type]
         name="Reassembly Resolution",
-        description="Longest-edge pixel size of the final reassembled global equirectangular map. "
-                    "'Auto' keeps the loaded world map's size",
+        description="Deprecated: use World Map Resolution at the top of the panel instead",
         items=[
             ("AUTO", "Auto (world size)", "Use the loaded world map's resolution"),
             ("4096", "4096 px", "4096 px longest edge"),
@@ -419,6 +450,49 @@ class ProjectionPastaErosionSettings(PropertyGroup):
         soft_min=-1000.0,
         soft_max=2000.0,
     )
+
+    # --- Coastline handling (force the input shore; soften the land/sea cutoff) ---
+    lock_coastline: BoolProperty(  # type: ignore[valid-type]
+        name="Lock Coastline",
+        description="Force the output land/sea boundary to match the INPUT coastline exactly, so "
+                    "erosion never moves the shore and neighbouring sections (which share the same "
+                    "global source map) tile seamlessly. Uses the Land/Sea Mask below if set, "
+                    "otherwise the input heightmap's sea level. Skips the coast-moving wave pass "
+                    "while on, and incompatible with glacial fjords (the locked shore wins)",
+        default=False,
+    )
+    landsea_filename: StringProperty(  # type: ignore[valid-type]
+        name="Land/Sea Mask",
+        description="Optional land/sea (coastline) mask in source/ used by Lock Coastline as the "
+                    "authoritative shore. Polarity (which tone is sea) is auto-oriented against the "
+                    "heightmap, so either convention works. Empty = derive the coastline from the "
+                    "input heightmap's sea level",
+        default="",
+    )
+    shore_taper_m: FloatProperty(  # type: ignore[valid-type]
+        name="Shore Taper (m)",
+        description="Fade erosion strength to zero across this many metres of elevation just above "
+                    "sea level, so the coast is carved less and less approaching the water. Softens "
+                    "the serrated/'teeth' shoreline that a hard land/sea cutoff produces. "
+                    "0 = hard cutoff (full erosion right up to the waterline)",
+        default=0.0,
+        min=0.0,
+        soft_max=500.0,
+    )
+
+    # --- Seam halo (erode neighbour context so rivers/relief don't break at section edges) ---
+    seam_halo_px: IntProperty(  # type: ignore[valid-type]
+        name="Seam Halo (px)",
+        description="Erode an extra ring of this many pixels of NEIGHBOURING terrain (read from the "
+                    "section's full Hammer canvas, in the same projection) around the section, then "
+                    "discard it. Gives rivers and relief real off-section context so they stay "
+                    "continuous across section seams -- the boundary's no-flow artifacts land in the "
+                    "discarded ring, not the kept core. 0 = off. Needs a section created with "
+                    "full-canvas retention (re-create older sections to use it)",
+        default=0,
+        min=0,
+        soft_max=256,
+    )
     # --- Seed conditioning (breaks D8 grid-bias -> meandering channels) ---
     noise_kind: EnumProperty(  # type: ignore[valid-type]
         name="Seed Noise",
@@ -456,6 +530,58 @@ class ProjectionPastaErosionSettings(PropertyGroup):
                     "to drive erosion. The section's crop of it is used; leave empty for uniform "
                     "rainfall. Auto-detected if a source map is named with 'rain'/'precip'",
         default="",
+    )
+
+    # --- Optional spatial drivers (per-cell fields cropped per section) ---
+    uplift_filename: StringProperty(  # type: ignore[valid-type]
+        name="Uplift Map",
+        description="Filename in source/ of an orogeny/uplift-intensity map (brighter = more uplift). "
+                    "Decoded by luminance; concentrates relief in active belts. Empty = uniform uplift",
+        default="",
+    )
+    uplift_influence: FloatProperty(  # type: ignore[valid-type]
+        name="Uplift Influence",
+        description="How strongly the Uplift Map modulates uplift. 0 = uniform (ignore the map); "
+                    "1 = uplift scales fully with map brightness (no uplift where the map is dark)",
+        default=0.0,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+    erodibility_filename: StringProperty(  # type: ignore[valid-type]
+        name="Erodibility Map",
+        description="Filename in source/ of a continuous soil/softness map (brighter = softer = erodes "
+                    "faster), e.g. SoilDepth (deep soil = thick erodible regolith). Decoded by luminance. "
+                    "Empty = uniform erodibility",
+        default="",
+    )
+    erodibility_contrast: FloatProperty(  # type: ignore[valid-type]
+        name="Erodibility Contrast",
+        description="Spread of erodibility (K) around the base value. 1 = uniform (ignore the map); "
+                    "higher = softer rock erodes much faster than hard rock (K x contrast at brightest, "
+                    "K / contrast at darkest)",
+        default=1.0,
+        min=1.0,
+        soft_max=8.0,
+    )
+
+    # --- Sediment deposition (transport-limited SPACE: builds flat alluvial land) ---
+    enable_deposition: BoolProperty(  # type: ignore[valid-type]
+        name="Sediment Deposition",
+        description="Switch the river engine from pure incision (carves canyons everywhere) to a "
+                    "transport-limited model (SPACE) that also DEPOSITS sediment where rivers slow "
+                    "down -- valley floors, lowlands, and the coast -- building flat alluvial land. "
+                    "This is the realistic fix for an over-incised, canyon-everywhere look",
+        default=False,
+    )
+    depo_v_s: FloatProperty(  # type: ignore[valid-type]
+        name="Deposition Rate",
+        description="Sediment settling velocity (the main deposition lever). Higher = sediment drops "
+                    "out sooner = thicker, flatter valley-floor and coastal-plain fill; lower = more "
+                    "stays in transport and the rivers keep incising. 0 ~ detachment-limited",
+        default=1.0,
+        min=0.0,
+        soft_max=10.0,
     )
 
     # --- Stream-power LEM parameters ---
@@ -545,6 +671,61 @@ class ProjectionPastaErosionSettings(PropertyGroup):
         max=0.9,
     )
 
+    # --- Glacial (fjord) erosion (runs BEFORE coastal and the LEM; carves U-troughs) ---
+    enable_glacial: BoolProperty(  # type: ignore[valid-type]
+        name="Glacial Erosion",
+        description="Carve glacial U-troughs and over-deepened basins BEFORE the coast and rivers: "
+                    "ice gathers above the snowline, flows downhill, and grinds valleys that can drop "
+                    "BELOW sea level -- so once flooded they become fjords. Runs first, as the earliest "
+                    "structural pre-pass; the coast and rivers then work the glaciated terrain",
+        default=False,
+    )
+    glacial_ela_frac: FloatProperty(  # type: ignore[valid-type]
+        name="Snowline Height",
+        description="Height of the permanent snowline (equilibrium line altitude) as a fraction of the "
+                    "section's relief above sea level. LOWER = more of the map sits under ice = deeper, "
+                    "more widespread fjords; higher = only the tallest peaks glaciate",
+        default=0.30,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+    glacial_k_g: FloatProperty(  # type: ignore[valid-type]
+        name="Carving Strength",
+        description="Glacial erosion coefficient (K_g). Linearly scales trough depth. The default is the "
+                    "published calibration; raise for deeper troughs, but prefer LOWERING the Snowline "
+                    "for deep SUSTAINED fjords (too-strong carving can eat the icefield's own snowfield)",
+        default=1.9e-5,
+        min=0.0,
+        soft_max=1.0e-4,
+        precision=6,
+    )
+    glacial_quarry_mult: FloatProperty(  # type: ignore[valid-type]
+        name="Quarrying",
+        description="Extra plucking of bedrock steps (risers) on top of abrasion. Higher = blockier, more "
+                    "deeply over-deepened trough floors (real fjords need this; abrasion alone under-cuts)",
+        default=1.0,
+        min=0.0,
+        soft_max=4.0,
+    )
+    glacial_diffuse: FloatProperty(  # type: ignore[valid-type]
+        name="U-Trough Smoothing",
+        description="Lateral smoothing under thick ice that rounds valley cross-sections from V-shaped "
+                    "(river) toward U-shaped (glacial). 0 = off",
+        default=0.3,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+    glacial_steps: IntProperty(  # type: ignore[valid-type]
+        name="Glacial Steps",
+        description="Ice-erosion iterations. More steps = deeper troughs and longer fjords (and more "
+                    "compute)",
+        default=120,
+        min=1,
+        soft_max=400,
+    )
+
     # --- Coastal (wave) erosion (runs BEFORE the LEM; reworks the coastline) ---
     enable_coastal: BoolProperty(  # type: ignore[valid-type]
         name="Coastal Erosion",
@@ -617,6 +798,67 @@ class ProjectionPastaErosionSettings(PropertyGroup):
         default=True,
     )
 
+    # --- Sea floor / bathymetry + Gaea export (consistent global sea datum) ---
+    enable_seafloor: BoolProperty(  # type: ignore[valid-type]
+        name="Sea Floor",
+        description="Fill the ocean with a realistic continental margin (shelf -> shelf break -> slope "
+                    "-> abyssal floor), keeping the glacial fjords as deep troughs, and write a separate "
+                    "Gaea export (<map>__gaea.png) that encodes land AND sea against one world-wide "
+                    "elevation range -- so sea level is at the same brightness in every section. The "
+                    "Reassembly heightmap is unaffected",
+        default=False,
+    )
+    seafloor_shelf_depth_m: FloatProperty(  # type: ignore[valid-type]
+        name="Shelf Break Depth (m)",
+        description="Water depth at the shelf break, where the gentle continental shelf gives way to the "
+                    "steeper slope (~130 m on Earth)",
+        default=130.0,
+        min=1.0,
+        soft_max=600.0,
+    )
+    seafloor_shelf_width_km: FloatProperty(  # type: ignore[valid-type]
+        name="Shelf Width (km)",
+        description="Width of the continental shelf off a LOWLAND coast. Mountainous coasts get a "
+                    "proportionally narrower shelf (see Shelf vs Relief)",
+        default=60.0,
+        min=0.0,
+        soft_max=400.0,
+    )
+    seafloor_shelf_relief_mod: FloatProperty(  # type: ignore[valid-type]
+        name="Shelf vs Relief",
+        description="How strongly the bordering land's height narrows the shelf. 0 = uniform width "
+                    "everywhere; 1 = mountainous coasts plunge straight to deep water (active margin), "
+                    "lowlands keep a broad shallow shelf (passive margin)",
+        default=0.7,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+    seafloor_slope_width_km: FloatProperty(  # type: ignore[valid-type]
+        name="Slope Width (km)",
+        description="Width of the continental slope: the distance over which the floor drops from the "
+                    "shelf break down to the abyssal plain (Ocean Floor Depth)",
+        default=40.0,
+        min=1.0,
+        soft_max=300.0,
+    )
+    seafloor_bathy_filename: StringProperty(  # type: ignore[valid-type]
+        name="Bathymetry Map",
+        description="Optional crop name (in this section's crops/) of a painted/real depth map: white = "
+                    "deepest (Ocean Floor Depth), black = shoreline. Blended over the procedural shelf and "
+                    "still unioned with the fjords. Empty = fully procedural sea floor",
+        default="",
+    )
+    seafloor_input_weight: FloatProperty(  # type: ignore[valid-type]
+        name="Bathymetry Map Weight",
+        description="How strongly the Bathymetry Map overrides the procedural shelf (1 = use the map, "
+                    "0 = ignore it). Only matters when a Bathymetry Map is set",
+        default=1.0,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+    )
+
     # --- Output ---
     target_peak_m: FloatProperty(  # type: ignore[valid-type]
         name="Target Peak (m)",
@@ -636,6 +878,9 @@ class ProjectionPastaErosionSettings(PropertyGroup):
     last_router: StringProperty(name="router", description="Flow router used in the last run", default="", options=_RO)  # type: ignore[valid-type]
     last_secs: FloatProperty(name="secs", description="Last run wall-clock seconds", default=0.0, options=_RO)  # type: ignore[valid-type]
     last_report: StringProperty(name="report", description="Last run summary line", default="", options=_RO)  # type: ignore[valid-type]
+    last_gaea_sea: FloatProperty(name="gaea_sea", description="Sea-level brightness to set in Gaea (last run)", default=0.0, options=_RO)  # type: ignore[valid-type]
+    last_gaea_height_m: FloatProperty(name="gaea_height", description="Gaea 'Height' value in metres (last run)", default=0.0, options=_RO)  # type: ignore[valid-type]
+    last_gaea_width_scale: FloatProperty(name="gaea_width_scale", description="Terrain-width multiplier to keep height:width ratio (last run)", default=1.0, options=_RO)  # type: ignore[valid-type]
 
 
 def register() -> None:
