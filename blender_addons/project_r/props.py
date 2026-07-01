@@ -307,16 +307,38 @@ class ProjectionPastaProjectSettings(PropertyGroup):
         default=True,
     )
 
+    # Target FINAL world-map resolution (longest edge). ONE global quality knob, set at
+    # the top alongside radius: it drives BOTH the reassembled map size AND every section's
+    # 'Auto' output/erosion detail (each section gets its angular share of this target).
+    # 'Auto' = keep the loaded world map's size -> sections stay at the legacy balanced,
+    # responsive detail, so the default is unchanged.
+    target_world_resolution: EnumProperty(  # type: ignore[valid-type]
+        name="World Map Resolution",
+        description="Longest-edge pixel size of the FINAL reassembled world map. This one knob "
+                    "drives reassembly AND every 'Auto' Output Resolution: each section is "
+                    "exported/eroded at its share of this target. 'Auto' keeps the loaded world "
+                    "map's size (sections keep a balanced, responsive Auto detail); a larger "
+                    "target makes sections + erosion scale up (finer, but slower)",
+        items=[
+            ("AUTO", "Auto (world size)", "Use the loaded world map's resolution; sections keep the legacy balanced Auto detail"),
+            ("4096", "4096 px", "Final world map 4096 px on its long edge"),
+            ("8192", "8192 px", "8192 px (sections scale up to match; slower erosion)"),
+            ("16384", "16384 px", "16384 px (much finer; sections + erosion get large)"),
+        ],
+        default="AUTO",
+    )
+
     # Target output resolution (longest edge) for processed section maps + the
-    # in-Blender erosion detail, and the reassembled global map. One quality knob.
+    # in-Blender erosion detail. Per-SECTION override; 'Auto' follows the global
+    # World Map Resolution target above.
     output_resolution: EnumProperty(  # type: ignore[valid-type]
         name="Output Resolution",
-        description="Per-SECTION longest-edge pixel size: the exported section crops and the "
-                    "in-Blender erosion detail. 'Auto' picks a balanced size for the section; "
-                    "higher = finer detail, but erosion time scales ~linearly with pixel count. "
-                    "(The reassembled global map size is set separately under Reassembly.)",
+        description="Per-SECTION longest-edge pixel size: the exported section crop and the "
+                    "in-Blender erosion detail. 'Auto' follows the World Map Resolution set at the "
+                    "top (this section's share of it); higher = finer detail, but erosion time "
+                    "scales ~linearly with pixel count. Pick an explicit size to override the target",
         items=[
-            ("AUTO", "Auto (optimal)", "A balanced size derived from the section's native resolution"),
+            ("AUTO", "Auto (from World Map Res)", "This section's share of the World Map Resolution target set at the top"),
             ("512", "512 px", "512 px longest edge"),
             ("1024", "1024 px", "1024 px longest edge"),
             ("2048", "2048 px", "2048 px longest edge (slow erosion)"),
@@ -326,13 +348,12 @@ class ProjectionPastaProjectSettings(PropertyGroup):
         default="AUTO",
     )
 
-    # Final reassembled global map size -- a GLOBAL (world-scale) resolution, kept
-    # separate from the per-section output_resolution so a per-section detail choice
-    # can never silently shrink the world deliverable.
+    # DEPRECATED: superseded by target_world_resolution (the top-level World Map
+    # Resolution now drives reassembly). Kept registered so old .blend files still load;
+    # no longer shown in the UI or read by the reassemble operator.
     reassembly_resolution: EnumProperty(  # type: ignore[valid-type]
         name="Reassembly Resolution",
-        description="Longest-edge pixel size of the final reassembled global equirectangular map. "
-                    "'Auto' keeps the loaded world map's size",
+        description="Deprecated: use World Map Resolution at the top of the panel instead",
         items=[
             ("AUTO", "Auto (world size)", "Use the loaded world map's resolution"),
             ("4096", "4096 px", "4096 px longest edge"),

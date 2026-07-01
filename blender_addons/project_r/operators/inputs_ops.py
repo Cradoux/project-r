@@ -369,6 +369,56 @@ def _write_class_masks(out_dir: Path, stem: str, rgb: np.ndarray, *, koppen: boo
     return written, res
 
 
+# Above this many distinct colours a map isn't a class raster (it's a photo/continuous
+# ramp that happens to match a categorical keyword) -- don't shatter it into masks.
+_CATEGORICAL_MAX_COLORS = 1500
+
+
+def export_section_class_masks(root: Path, sec: dict, source_paths) -> list:
+    """Silently emit per-class Gaea masks for every categorical classification map
+    (Köppen / biome / rock type / geologic province / ...) among a section's source
+    maps. Each is reprojected into the section's exact Hammer crop with NEAREST sampling
+    (palette-preserving), split into one hard 8-bit B&W mask per class, and written to
+    ``sections/<id>/masks/<stem>/`` -- additional outputs that register 1:1 with the
+    terrain taken into Gaea.
+
+    Recognised by filename (``layers.is_categorical_name``); a keyword match that turns
+    out to be continuous (too many colours) is skipped. Never raises: a per-map failure
+    is logged and skipped so it can't fail section creation. Returns a summary list of
+    ``{"map", "classes"}`` for the maps that produced masks.
+    """
+    sec_id = str(sec.get("id", ""))
+    results: list = []
+    for src_path in source_paths:
+        src_path = Path(src_path)
+        if not layers.is_categorical_name(src_path.name):
+            continue
+        try:
+            from PIL import Image as PILImage  # required dep
+            rgb = np.asarray(PILImage.open(src_path).convert("RGB"), dtype=np.uint8)
+        except Exception as e:
+            print(f"[Project-R] Class masks: skipped {src_path.name} (load failed: {e})")
+            continue
+        if not rgb.size or decode.detect_palette(rgb)[1] > _CATEGORICAL_MAX_COLORS:
+            print(f"[Project-R] Class masks: skipped {src_path.name} (not categorical -- too many colours)")
+            continue
+        koppen = "koppen" in src_path.stem.lower()
+        try:
+            sec_rgb = _reproject_categorical_to_section(rgb, sec, root)
+            out_dir = root / "sections" / sec_id / "masks" / src_path.stem
+            # Skip the pure-white background (ocean / no-data) so the extra outputs stay
+            # meaningful terrain-class masks.
+            written, _ = _write_class_masks(out_dir, src_path.stem, sec_rgb,
+                                            koppen=koppen, skip_white=True)
+        except Exception as e:
+            print(f"[Project-R] Class masks: failed for {src_path.name} ({e})")
+            continue
+        print(f"[Project-R] Class masks: {written} written for {src_path.name} "
+              f"-> sections/{sec_id}/masks/{src_path.stem}/" + (" (Köppen-named)" if koppen else ""))
+        results.append({"map": src_path.name, "classes": written})
+    return results
+
+
 class PP_OT_export_class_masks(Operator):
     bl_idname = "pp.export_class_masks"
     bl_label = "Export Class Masks"

@@ -211,18 +211,20 @@ Koppen against the real export:
 **Scope:** Biome + Koppen for now (the script generalises to any categorical map listed in the catalog —
 RockType, GeologicProvince, plates, Vegetation, Waterbodies — when we choose to extend it).
 
-**Status:** IMPLEMENTED in the Map Inputs panel (`pp.export_class_masks`, GLOBAL + SECTION scope). The notes below
-describe that design.
+**Status:** IMPLEMENTED. Category masks are now a **silent side-effect of Create Section** — there are no
+mask controls in the panel. Any categorical classification map (recognised by `layers.is_categorical_name`:
+Köppen/climate, biome, rock type, geologic province, plates, …) that is present in `source/` is reprojected
+into the new section's exact Hammer crop (nearest, palette-preserving) and split into one B&W mask per class
+under `sections/<id>/masks/<stem>/`, alongside the terrain crops. A colour guard (`>1500` distinct colours)
+skips a keyword-matching map that is actually continuous. The old `pp.export_class_masks` operator (GLOBAL +
+SECTION scope, with a file picker) stays registered for manual/whole-equirect use but is no longer in the UI.
 
-**UI / pipeline integration:** add an **"Export class masks"** action on the categorical layer slots
-(Biome/Koppen) in the Map Inputs panel. Run it in **two modes**, reusing the same nearest-palette decode:
-- **Global:** split the 4096×2048 equirect map → `source/<layer>_masks/*.png` + `*_palette.json`.
-- **Per-section (the Gaea-relevant one):** when a section heightmap is exported, crop each categorical
-  layer through the **same oblique Hammer projection + crop rect** as the heightmap (nearest-neighbour
-  interp, per `interp_for_layer`) and split *that* into masks → `sections/<id>/masks/`. The masks then line
-  up pixel-for-pixel with the section terrain you sculpt in Gaea.
-- Port `split_categorical.py`'s logic into the addon (it's pure numpy/PIL, no bpy) so it reuses
-  `layers.py`'s categorical handling rather than living as a standalone script.
+**Pipeline integration (as built):** `PP_OT_create_section` calls
+`inputs_ops.export_section_class_masks(root, section_entry, source_maps)` right after the manifest is written.
+It reuses `_reproject_categorical_to_section` (same oblique Hammer projection + crop rect as the heightmap,
+nearest-neighbour) and `_write_class_masks` (the ported `split_categorical.py` logic — pure numpy/PIL). So the
+masks line up pixel-for-pixel with the section terrain you sculpt in Gaea, and appear automatically for every
+section without a button. A per-map failure is logged and skipped so it can never fail section creation.
 
 ## 6. Open questions / things to verify
 

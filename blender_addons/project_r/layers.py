@@ -32,6 +32,13 @@ UPLIFT_KEYWORDS = ("orogeny", "uplift")
 # = thick erodible regolith). Categorical rock-type maps are intentionally NOT used here --
 # they'd need a per-class legend to order hardness, which isn't available.
 ERODIBILITY_KEYWORDS = ("soildepth",)
+# Semantic classification rasters (Köppen/climate, biome, rock type, geologic province,
+# tectonic plates, ...) whose distinct colours are classes. Section creation splits any of
+# these it finds in source/ into one B&W mask per class for downstream Gaea use. Kept
+# separate from MASK_KEYWORDS (which only drives reprojection interp): these are the maps
+# the auto class-mask export recognises by name.
+CATEGORICAL_KEYWORDS = ("koppen", "climate", "biome", "rocktype", "geolog", "province",
+                        "litholog", "terrane", "plates", "landcover", "landform")
 
 _COLOR_EXTS = (".png", ".jpg", ".jpeg")
 
@@ -95,6 +102,13 @@ def is_uplift_name(name: str) -> bool:
 def is_erodibility_name(name: str) -> bool:
     """A lithology / geology map usable as a spatial erodibility (K_sp) field."""
     return _has_kw(name, ERODIBILITY_KEYWORDS)
+
+
+def is_categorical_name(name: str) -> bool:
+    """A categorical classification raster (Köppen/biome/rock-type/geologic province/
+    plates/...) whose distinct colours are classes -- the maps the auto class-mask
+    export splits into one B&W mask per class."""
+    return _has_kw(name, CATEGORICAL_KEYWORDS)
 
 
 def classify_source_folder(filenames):

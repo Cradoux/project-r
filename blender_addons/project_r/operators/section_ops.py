@@ -839,16 +839,23 @@ class PP_OT_create_section(bpy.types.Operator):
         # busy cursor + status-bar progress, and on failure remove the partial
         # section folders and report cleanly instead of throwing raw mid-write and
         # leaving an orphan section directory with no manifest entry.
-        # Output resolution for exported crops (longest edge). AUTO keeps the native
-        # crop size (full source detail); an explicit size resamples each crop.
+        # Output resolution for exported crops (longest edge). AUTO follows the global
+        # World Map Resolution target: with a target set, each section is exported at its
+        # share of it (native x target/world); with the target on 'Auto' (world size) AUTO
+        # keeps the native crop size (full source detail). An explicit size wins.
         native_long = max(int(rect.w), int(rect.h))
-        if str(s.output_resolution) == "AUTO":
-            export_res = native_long
-        else:
+        world_long = max(int(full_w), int(full_h))
+        tgt = str(s.target_world_resolution)
+        if str(s.output_resolution) != "AUTO":
             try:
                 export_res = int(s.output_resolution)
             except (TypeError, ValueError):
                 export_res = native_long
+        elif tgt in ("AUTO", "", "WORLD"):
+            export_res = native_long
+        else:
+            target_long = erosion.resolve_world_resolution(tgt, world_long)
+            export_res = max(64, int(round(native_long * target_long / max(world_long, 1))))
 
         win = context.window
         wm = context.window_manager
@@ -1071,6 +1078,21 @@ class PP_OT_create_section(bpy.types.Operator):
         manifest.setdefault("sections", []).append(section_entry)
         manifest_lib.write_manifest(mp, manifest)
 
+        # Silently export per-class Gaea masks for any categorical classification map
+        # (Köppen / biome / geology / ...) that was uploaded into source/. These are
+        # additional outputs reprojected into this section's exact crop; a failure here
+        # never fails the section. section_entry carries the projection + crop geometry
+        # the exporter needs.
+        try:
+            from .inputs_ops import export_section_class_masks
+            mask_summary = export_section_class_masks(root, section_entry, source_maps)
+            if mask_summary:
+                total = sum(m["classes"] for m in mask_summary)
+                print(f"[Project-R] Auto-exported {total} class mask(s) from "
+                      f"{len(mask_summary)} categorical map(s) into sections/{sec_id}/masks/")
+        except Exception as e:
+            print(f"[Project-R] Warning: class-mask auto-export skipped: {e}")
+
         # Write human-readable section_info.txt
         created_utc = dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
         _write_section_info_txt(
@@ -1100,9 +1122,11 @@ class PP_OT_create_section(bpy.types.Operator):
         except Exception:
             pass
 
-        # Suggest the balanced erosion/output resolution for this selection so the
-        # user can pick a sensible Output Resolution (AUTO already uses it).
-        suggested_res = erosion.suggest_resolution(native_long)
+        # Suggest the erosion/output resolution AUTO would use for this selection (its
+        # share of the World Map Resolution target, or the balanced native size when the
+        # target is on Auto) so the readout matches what an Auto erode will run at.
+        suggested_res = erosion.resolve_section_output(
+            "AUTO", native_long, world_long, str(s.target_world_resolution))
         self.report(
             {"INFO"},
             f"Created section '{s.new_section_name}' - {extent_width_km:.0f} x {extent_height_km:.0f} km "

@@ -50,6 +50,7 @@ class PP_PT_main(_PRPanel, Panel):
         col.prop(s, "planet_radius_km", text="Planet Radius")
         col.prop(s, "max_elevation_m", text="Max Elevation")
         col.prop(s, "ocean_floor_depth_m", text="Ocean Floor Depth")
+        col.prop(s, "target_world_resolution", text="World Map Res")
 
         mp = s.manifest_path()
         has_project = bool(mp and mp.exists())
@@ -143,14 +144,10 @@ class PP_PT_inputs(_PRPanel, Panel):
         if es.erodibility_filename:
             drv.prop(es, "erodibility_contrast", text="Contrast")
 
-        # Categorical -> per-class B&W masks (Gaea downstream).
+        # Categorical maps (Biome / Köppen / geology) need no controls: Create Section
+        # silently writes one B&W Gaea mask per class into the section's masks/ folder.
         layout.separator()
-        box = layout.box()
-        box.label(text="Category Masks (for Gaea)", icon="MOD_MASK")
-        box.label(text="Biome / Koppen -> one B&W mask per class")
-        box.operator("pp.export_class_masks", text="Global Masks...", icon="EXPORT").scope = "GLOBAL"
-        box.operator("pp.export_class_masks", text="Section Masks...", icon="EXPORT").scope = "SECTION"
-        box.label(text="Section uses the Erosion panel's target", icon="INFO")
+        layout.label(text="Categorical maps auto-export Gaea masks on Create Section", icon="MOD_MASK")
 
 
 # ---------------------------------------------------------------------------
@@ -532,9 +529,9 @@ class PP_PT_reassembly(_PRPanel, Panel):
         col = layout.column()
         col.use_property_split = True
         col.use_property_decorate = False
-        col.prop(s, "reassembly_resolution")
         col.prop(s, "extend_edge_colors")
         col.prop(s, "normalize_heightmaps", text="Normalize Heights")
+        col.label(text="Output size follows World Map Res (top)", icon="INFO")
 
         layout.operator("pp.validate_processed", text="Validate", icon="CHECKMARK")
         row = layout.row()

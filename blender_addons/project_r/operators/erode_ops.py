@@ -248,8 +248,15 @@ class PP_OT_erode_section(bpy.types.Operator):
 
         # --- Output/detail resolution: erode AT the chosen longest-edge size and
         # write the processed map at it (Reassemble resamples to the section rect as
-        # needed). 'Auto' picks a balanced size from the crop's native resolution. ---
-        out_res = erosion.resolve_resolution(str(s.output_resolution), max(W0, H0))
+        # needed). 'Auto' follows the global World Map Resolution target -- the section's
+        # share of it -- computed from the section's NATIVE crop rect + full-canvas world
+        # size (from the manifest, so a re-exported crop can't skew it). ---
+        _rect = (sec.get("crop", {}) or {}).get("rect_xywh") or []
+        native_long = max(int(_rect[2]), int(_rect[3])) if len(_rect) >= 4 else max(W0, H0)
+        _fc = (sec.get("full_canvas", {}) or {}).get("size") or []
+        world_long = max(int(_fc[0]), int(_fc[1])) if len(_fc) >= 2 else 0
+        out_res = erosion.resolve_section_output(
+            str(s.output_resolution), native_long, world_long, str(s.target_world_resolution))
         if max(W0, H0) != out_res:
             scale = out_res / float(max(W0, H0))
             work_w = max(8, int(round(W0 * scale)))
